@@ -1,0 +1,9 @@
+.venv/
+runtime/
+__pycache__/
+*.pyc
+.idea/
+yt-dlp/
+# 技术细节档案只保留在本地，不随仓库上传
+docs/
+tools/ffmpeg/ffmpeg.exe

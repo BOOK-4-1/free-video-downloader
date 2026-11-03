@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>卡密兑换 · 秒下 VideoGrab</title>
+  <meta name="description" content="输入卡密兑换秒下 VideoGrab 会员权益：4K 原画、仅音频导出、批量合集下载、并行任务加速。" />
+  <meta name="theme-color" content="#1777ff" />
+  <link rel="icon" href="/assets/img/favicon.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="/assets/css/style.css" />
+  <style>
+    .store-hero { padding: 46px 0 0; text-align: center; }
+    .store-hero h1 { margin: 0; font-size: 30px; font-weight: 900; letter-spacing: -0.02em; }
+    .store-hero h1 .hl { color: var(--primary); }
+    .store-hero p { margin: 12px 0 0; color: var(--text-2); font-size: 14px; }
+    .redeem-card { max-width: 560px; margin: 26px auto 0; padding: 24px; }
+    .redeem-card label { display: block; font-size: 13px; font-weight: 700; margin-bottom: 8px; }
+    .code-box {
+      display: flex; gap: 10px;
+    }
+    .code-box input {
+      flex: 1; height: 48px; border: 0; outline: none;
+      border-radius: var(--radius-sm);
+      background: #f8fafc;
+      box-shadow: 0 0 0 1px var(--ring) inset;
+      padding: 0 14px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 15px; letter-spacing: 0.08em; text-transform: uppercase;
+      color: var(--text);
+    }
+    .code-box input:focus { box-shadow: 0 0 0 1.5px var(--primary) inset; }
+    .redeem-msg { margin-top: 14px; font-size: 13px; }
+    .vip-card {
+      max-width: 560px; margin: 18px auto 0; padding: 20px 24px;
+      display: none;
+    }
+    .vip-card.show { display: block; animation: rise .4s var(--ease) both; }
+    .vip-row { display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--text-2); margin-top: 8px; }
+    .vip-row b { color: var(--text); }
+    .vip-ok { color: #16a34a; font-weight: 700; display: flex; align-items: center; gap: 6px; font-size: 14px; }
+    .table { max-width: 760px; margin: 34px auto 0; }
+    .table .card { padding: 0; overflow: hidden; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { padding: 12px 16px; text-align: left; border-bottom: 1px solid var(--line); }
+    th { font-size: 12px; font-weight: 700; color: var(--text-2); background: #fafbfc; }
+    tr:last-child td { border-bottom: 0; }
+    td b { color: var(--primary); }
+  </style>
+</head>
+<body>
+  <header class="header">
+    <div class="wrap header-inner">
+      <a class="brand" href="/">
+        <span class="brand-logo" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 3v11" /><path d="m7.5 10 4.5 4.5L16.5 10" /><path d="M4 19h16" />
+          </svg>
+        </span>
+        <span class="brand-name">秒下<small>VideoGrab</small></span>
+      </a>
+      <nav class="nav">
+        <a href="/" data-nav="home">在线下载</a>
+        <a href="/#features" data-nav="features">功能</a>
+        <a href="/#how" data-nav="how">怎么用</a>
+        <a href="/#pricing" data-nav="pricing">会员</a>
+        <a href="/store" data-nav="store">卡密兑换</a>
+        <a href="/#faq" data-nav="faq">常见问题</a>
+      </nav>
+      <div class="header-right">
+        <button class="btn btn-ghost btn-sm" data-action="cookie" id="cookieBtn">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M9 9h.01M15 9h.01M9 15c1-1 2.5-1 3.5 0"/></svg>
+          <span class="cookie-label">导入 Cookie</span>
+          <i class="cookie-dot" aria-hidden="true"></i>
+        </button>
+        <a href="/#pricing" class="btn btn-primary btn-sm">开通 VIP</a>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <section class="wrap store-hero">
+      <h1>输入卡密，<span class="hl">解锁会员权益</span></h1>
+      <p>会员为一次性买断，不自动续费。兑换后权益保存在本机浏览器。</p>
+    </section>
+
+    <section class="wrap">
+      <div class="card redeem-card">
+        <label for="codeInput">会员卡密</label>
+        <div class="code-box">
+          <input id="codeInput" placeholder="VG-XXXX-XXXX-XXXX" autocomplete="off" spellcheck="false" />
+          <button class="btn btn-primary" id="redeemBtn" style="height:48px;padding:0 24px">立即兑换</button>
+        </div>
+        <p style="font-size:12px;color:var(--text-3);margin:10px 0 0">
+          演示卡密：<code style="color:var(--primary)">VG-DEMO-8888-2026</code>（仅演示交互，不校验真实签名）
+        </p>
+        <div class="redeem-msg" id="redeemMsg"></div>
+      </div>
+
+      <div class="card vip-card" id="vipCard">
+        <div class="vip-ok">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><path d="m5 13 4 4L19 7"/></svg>
+          会员权益已激活
+        </div>
+        <div class="vip-row">卡密：<b id="vipCode">-</b></div>
+        <div class="vip-row">有效期：<b>永久</b></div>
+        <div class="vip-row">已解锁：4K 原画 · 仅音频导出 · 批量合集 · 3 任务并行 · 文件暂存 24 小时</div>
+        <div class="notice" style="margin-top:14px">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 8h.01M11 12h1v4h1"/></svg>
+          <span>当前版本为演示：权益已记录在本机，真正的下载权限校验（含卡密签名校验、支付回调）将在下一阶段接入后端。</span>
+        </div>
+      </div>
+
+      <div class="table">
+        <div class="card">
+          <table>
+            <thead>
+              <tr><th>能力</th><th>免费版</th><th>会员版</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>单链接下载</td><td>✓</td><td><b>✓</b></td></tr>
+              <tr><td>最高清晰度</td><td>1080P</td><td><b>4K / 原画</b></td></tr>
+              <tr><td>仅音频导出</td><td>—</td><td><b>✓</b></td></tr>
+              <tr><td>合集 / 批量</td><td>—</td><td><b>✓</b></td></tr>
+              <tr><td>并行任务</td><td>1</td><td><b>3</b></td></tr>
+              <tr><td>文件暂存</td><td>30 分钟</td><td><b>24 小时</b></td></tr>
+              <tr><td>价格</td><td>¥0</td><td><b>¥29 一次性</b></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div style="max-width:560px;margin:20px auto 0">
+        <a href="/#pricing" class="btn btn-block">查看完整会员定价</a>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <div class="wrap">
+      <div class="links">
+        <a href="/" data-foot="home">在线下载</a>
+        <a href="/#features">功能</a>
+        <a href="/#how">怎么用</a>
+        <a href="/#pricing">会员</a>
+        <a href="/store">卡密兑换</a>
+        <a href="/#faq">常见问题</a>
+        <a href="#" data-action="cookie">导入 Cookie</a>
+      </div>
+      <div>秒下 VideoGrab · 基于开源 <a href="https://github.com/yt-dlp/yt-dlp" target="_blank" rel="noopener">yt-dlp</a> 构建 · 仅供个人学习研究，请尊重版权</div>
+      <div class="footer-sub">不存储视频内容 · 文件 30 分钟后自动清理 · 建议 18 岁以上使用</div>
+    </div>
+  </footer>
+
+  <div id="toastRoot" class="toast-root"></div>
+  <script>
+    (function () {
+      var KEY = 'vg_vip';
+      var input = document.getElementById('codeInput');
+      var btn = document.getElementById('redeemBtn');
+      var msg = document.getElementById('redeemMsg');
+      var card = document.getElementById('vipCard');
+      var root = document.getElementById('toastRoot');
+
+      function toast(text, type) {
+        var d = document.createElement('div');
+        d.className = 'toast ' + (type || '');
+        d.textContent = text;
+        root.appendChild(d);
+        setTimeout(function () { d.remove(); }, 3000);
+      }
+
+      function showVip(code) {
+        document.getElementById('vipCode').textContent = code;
+        card.classList.add('show');
+      }
+
+      var saved = localStorage.getItem(KEY);
+      if (saved) showVip(saved);
+
+      btn.onclick = function () {
+        var code = (input.value || '').trim().toUpperCase();
+        if (!code) {
+          msg.textContent = '请先输入卡密';
+          msg.style.color = '#e5484d';
+          return;
+        }
+        if (!/^VG-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(code)) {
+          msg.textContent = '卡密格式不正确，应形如 VG-XXXX-XXXX-XXXX';
+          msg.style.color = '#e5484d';
+          return;
+        }
+        localStorage.setItem(KEY, code);
+        msg.textContent = '';
+        showVip(code);
+        toast('兑换成功，会员权益已激活', 'ok');
+        card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      };
+
+      input.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') btn.click();
+      });
+      // 自动补全分隔符，输入体验更顺
+      input.addEventListener('input', function () {
+        var v = input.value.replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+        var parts = [];
+        if (v.startsWith('VG')) {
+          parts.push('VG');
+          v = v.slice(2);
+        }
+        for (var i = 0; i < v.length && parts.length < 4; i += 4) parts.push(v.substr(i, 4));
+        input.value = parts.join('-');
+      });
+    })();
+  </script>
+  <script src="/assets/js/nav.js"></script>
+  <script src="/assets/js/header-ui.js"></script>
+</body>
+</html>
