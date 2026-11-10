@@ -4,6 +4,10 @@ __pycache__/
 *.pyc
 .idea/
 yt-dlp/
-# 技术细节档案只保留在本地，不随仓库上传
+# AI 配置含密钥，只提交 .env.example 模板
+.env
+.env.local
+# 技术细节档案与工作区记忆只保留在本地，不随仓库上传
 docs/
+.workbuddy/
 tools/ffmpeg/ffmpeg.exe

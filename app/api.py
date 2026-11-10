@@ -6,6 +6,7 @@
 """
 import asyncio
 import io
+import json
 import os
 import threading
 import time
@@ -18,7 +19,7 @@ from starlette.background import BackgroundTask
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
-from app import config, downloader, tasks
+from app import config, downloader, subtitle, summarizer, tasks
 
 router = APIRouter(prefix="/api")
 
@@ -332,6 +333,146 @@ async def thumb(url: str = Query(...)):
             ),
             media_type="image/png",
         )
+
+
+# ---------------------------------------------------------------------------
+# AI 视频总结：配置状态 / 字幕验证 / 幂等提交 / SSE 增量流
+# ---------------------------------------------------------------------------
+class AiSubtitleReq(BaseModel):
+    url: str
+    cookies: str = ""
+
+
+@router.get("/ai/config")
+async def ai_config():
+    """只回配置态，绝不回 api_key；summarizer_ready=False 时前端给出配置指引"""
+    cloud = bool(config.AI_BASE_URL and config.AI_API_KEY and config.AI_MODEL)
+    fallback = bool(config.AI_FALLBACK_BASE_URL and config.AI_FALLBACK_MODEL)
+    return {
+        "success": True,
+        "data": {
+            "configured": cloud,
+            "provider": "cloud" if cloud else ("local" if fallback else "none"),
+            "model": config.AI_MODEL or config.AI_FALLBACK_MODEL or "",
+            "has_fallback": fallback,
+            "summarizer_ready": summarizer.is_ready(),
+            "stage": "stable",
+            "subtitle_cache": subtitle.cache_stats(),
+        },
+    }
+
+
+@router.post("/ai/subtitle")
+async def ai_subtitle(req: AiSubtitleReq = Body(...)):
+    """调试/验证用：返回字幕轨道清单 + 归一化后的带时间戳分段（不调用任何 LLM）。
+
+    正常流程里 /api/parse 已经把字幕正文放进内存缓存，这里直接命中；
+    独立调用（没先解析）时会自己 extract_info 一次。
+    """
+    urls = downloader.extract_urls(req.url)
+    if not urls:
+        raise HTTPException(400, "没有识别到有效链接")
+    url = urls[0]
+    cookie_file = _ck(req.cookies, url)
+    loop = asyncio.get_running_loop()
+    try:
+        data = await asyncio.wait_for(
+            loop.run_in_executor(
+                None,
+                lambda: subtitle.resolve(
+                    url,
+                    has_cookie=bool(cookie_file),
+                    cookies_text=downloader.normalize_cookie_text(req.cookies),
+                    cookie_file=cookie_file,
+                ),
+            ),
+            timeout=downloader.PARSE_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(504, "取字幕超时，该平台可能被网络限制，换个链接试试") from None
+    return {"success": True, "data": data}
+
+
+class AiSummaryReq(BaseModel):
+    url: str
+    cookies: str = ""
+    style: str = "detailed"
+    force: bool = False      # 「重新生成」按钮：跳过已有结果强制重算
+
+
+@router.post("/ai/summary")
+async def ai_summary(req: AiSummaryReq = Body(...)):
+    """提交或复用 AI 总结任务（按「归一化 URL + 登录态指纹 + 风格」幂等）。
+
+    命中 done：直接把 result 返回，0 次模型调用；
+    命中 queued/running：返回同一个 task_id，前端用 SSE 续接，不重复扣费；
+    未命中：新建任务并启动。force=True 时强制新建、覆盖索引。
+    """
+    urls = downloader.extract_urls(req.url)
+    if not urls:
+        raise HTTPException(400, "没有识别到有效链接")
+    url = urls[0]
+    norm_cookies = downloader.normalize_cookie_text(req.cookies)
+    key = summarizer.cache_key(url, norm_cookies, req.style)
+
+    # 乐观查询：命中就不写临时 Cookie 文件，也不占用并发额度
+    hit = None if req.force else summarizer.find_by_key(key)
+    if hit and hit["status"] in ("queued", "running", "done"):
+        data = summarizer.serialize(hit)
+        data["reused"] = True
+        return {"success": True, "data": data}
+
+    running = [t for t in summarizer.all_tasks() if t["status"] in ("queued", "running")]
+    if len(running) >= 8:
+        raise HTTPException(429, "AI 总结任务较多，请稍后再试")
+    cookie_file = _ck(req.cookies, url)
+    # acquire 在锁内二次确认，挡住双击 / 多标签页的并发重复提交
+    task, reused = summarizer.acquire(
+        url, norm_cookies, cookie_file, req.style,
+        loop=asyncio.get_running_loop(), force=req.force,
+    )
+    if reused and cookie_file:
+        try:
+            os.remove(cookie_file)   # 并发撞车时这个临时文件用不上了
+        except OSError:
+            pass
+    if not reused:
+        summarizer.start(task["id"])
+    data = summarizer.serialize(task)
+    data["reused"] = reused
+    return {"success": True, "data": data}
+
+
+@router.get("/ai/summary/{task_id}/stream")
+async def ai_summary_stream(task_id: str, after: int = 0):
+    """SSE：把生成过程增量推给页面（stage / meta / token / partial / done / error）。
+
+    断线重连时用 after 补发历史事件；任务已完成时只补发历史后立即结束。
+    旧的轮询接口保留，作为流不可用时的回退通道。
+    """
+    if not summarizer.get(task_id):
+        raise HTTPException(404, "AI 总结任务不存在或已过期")
+
+    async def gen():
+        async for ev in summarizer.stream_events(task_id, after):
+            yield (
+                f"id: {ev['id']}\n"
+                f"event: {ev['event']}\n"
+                f"data: {json.dumps(ev['data'], ensure_ascii=False)}\n\n"
+            )
+
+    return StreamingResponse(
+        gen(), media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
+    )
+
+
+@router.get("/ai/summary/{task_id}")
+async def ai_summary_status(task_id: str):
+    t = summarizer.get(task_id)
+    if not t:
+        raise HTTPException(404, "AI 总结任务不存在或已过期")
+    return {"success": True, "data": summarizer.serialize(t)}
 
 
 @router.get("/stats")

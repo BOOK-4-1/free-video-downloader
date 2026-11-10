@@ -5,6 +5,7 @@
 - 抖音等平台 yt-dlp 需要 cookies 才能解析 —— 原项目自己写了解析器，本项目改为
   “浏览器 Cookie 导入”，用户只做一次，之后所有平台都能用，代码量反而更少。
 """
+import json
 import os
 import re
 import shutil
@@ -13,8 +14,10 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 
+from app import bilibili
 from app import config
 from app import douyin
+from app import subtitle
 
 if config.YTDLP_DIR not in sys.path:
     sys.path.insert(0, config.YTDLP_DIR)
@@ -137,6 +140,9 @@ def parse(url: str, cookies: str = "") -> dict:
             f.pop("_play_url", None)
         return data
     opts = _base_opts()
+    # 主解析流程绝不开启 writesubtitles：B 站提取器开启后会额外请求
+    # x/player/wbi/v2，带登录态 Cookie 时该接口常返回 412，会把整次解析拖垮。
+    # 字幕正文由 AI 总结链路的 extract_raw() / 直连兜底单独获取，互不影响。
     if cookies:
         opts["cookiefile"] = cookies
     try:
@@ -159,7 +165,48 @@ def parse(url: str, cookies: str = "") -> dict:
         # 只有一条：当成单条视频继续解析（可能是多 P 的第 1 P）
         info = entries[0]
 
-    return _shape_single(info, url)
+    # 顺手把字幕正文存进内存缓存：这次 extract_info 已经付过字幕下载成本，
+    # _shape_single() 只保留清单，AI 总结需要正文（不落盘、不改返回结构）
+    try:
+        subtitle.cache_put(url, bool(cookies), info)
+    except Exception:  # noqa: BLE001
+        pass
+
+    data = _shape_single(info, url)
+    # B 站多 P 补充：yt-dlp 看到 ?p=N 就只返回当前这一 P（entries 为空），主解析又固定
+    # noplaylist=True，因此拿不到同一 BV 下的其他分 P。这里旁路直连 view 接口补回
+    # 完整清单；失败或单 P 时保持原样，绝不影响这条视频本身的解析与下载。
+    if not data["parts"] and bilibili.is_video_url(url):
+        try:
+            parts = bilibili.fetch_parts(info.get("id") or url, cookies)
+            if len(parts) > 1:
+                data["parts"] = parts[:PLAYLIST_MAX]
+        except Exception:  # noqa: BLE001
+            pass
+    return data
+
+
+def extract_raw(url: str, cookies: str = "") -> dict:
+    """拿 yt-dlp 的原始 info（不整形）：字幕缓存没命中时给 AI 总结用。
+
+    不下载视频；B 站提取器会在这一步顺带把字幕正文取回来。
+    抖音自有通道没有字幕轨，返回空 dict，由上层给「暂不支持」提示。
+    """
+    if douyin.is_douyin(url):
+        return {}
+    opts = _base_opts()
+    # B 站不走 yt-dlp 的字幕接口（wbi/v2 带 Cookie 常被 412 拦），由
+    # subtitle.fetch_bilibili_direct() 直连兜底；其它平台仍需开启才能取回正文。
+    low = (url or "").lower()
+    if "bilibili.com" not in low and "b23.tv" not in low:
+        opts["writesubtitles"] = True
+    if cookies:
+        opts["cookiefile"] = cookies
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            return ydl.extract_info(url, download=False) or {}
+    except Exception:  # noqa: BLE001
+        return {}
 
 
 def _shape_single(info: dict, url: str) -> dict:
@@ -397,6 +444,9 @@ def _friendly_error(msg: str) -> str:
     low = msg.lower()
     # 顺序有讲究：越具体的规则越靠前（例如 "No video formats found" 要先于泛化的 "not available"）
     rules = [
+        # 412 必须放最前：B 站限流的原始报错偶尔带 login / cookies 字样，
+        # 若被泛化规则命中会误导成「需要导入 Cookie」，进而触发前端自动弹窗
+        ("412", "平台临时拒绝了请求（412 反爬限流）。这通常不是登录信息的问题：稍等半分钟再解析一次；若一直失败，换个链接或检查网络"),
         ("unsupported url", "这个链接暂不支持，请确认是视频页面地址（不是主页/搜索页）"),
         ("fresh cookies", "该平台需要「已登录」的 Cookie：点右上角「导入 Cookie」粘贴一次后重试"),
         ("no video formats found", "没解析出可下载的视频流：私密 / 图文笔记 / 已删除的内容取不到，换一条视频链接试试"),
@@ -589,55 +639,141 @@ COOKIE_DOMAINS = {
 }
 
 
-def parse_cookie_text(text: str) -> list:
-    """把用户粘贴的内容解析成 [(name, value), ...]
+# DevTools 的 Cookies 表格复制出来时可能带表头，这些词不是真正的 Cookie 名
+_HEADER_WORDS = {"name", "value", "cookie", "cookie name", "key", "名称", "值"}
+_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.\-]*$")
 
-    支持三种常见形态：
+
+def _clean_cookie_value(v) -> str:
+    """浏览器复制单元格时常给值套一层引号；同时去掉会破坏 Netscape/HTTP 头的空白。"""
+    s = "" if v is None else str(v).strip()
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in ('"', "'"):
+        s = s[1:-1].strip()
+    return s.replace("\t", "").replace("\r", "").replace("\n", "")
+
+
+def _valid_cookie_name(k) -> bool:
+    k = ("" if k is None else str(k)).strip()
+    return bool(_NAME_RE.match(k)) and k.lower() not in _HEADER_WORDS
+
+
+def parse_cookie_text(text: str) -> list:
+    """把用户粘贴的内容解析成 [(name, value), ...]。
+
+    支持五种常见形态（浏览器 DevTools 复制出来的花样比想象中多）：
     1. 请求头形式：  a=b; c=d; e=f
     2. 整段请求头：  Cookie: a=b; c=d
-    3. Netscape 文件：每行 7 列，用 TAB 分隔
+    3. Netscape 文件：每行 7 列，用 TAB 分隔，首列是域名
+    4. DevTools「Application → Cookies」表格复制：每行 名称<TAB>"值"[<TAB>域名...]
+       —— 单行只复制一个 Cookie（例如 B 站只复制 SESSDATA）也必须能识别
+    5. 扩展导出的 JSON： [{"name":"...","value":"..."}] 或 {"cookies":[...]}
     """
     text = (text or "").strip()
     if not text:
         return []
     pairs = []
-    # Netscape 格式
-    if "\t" in text:
-        for line in text.splitlines():
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            cols = line.split("\t")
-            if len(cols) >= 7:
-                pairs.append((cols[5].strip(), cols[6].strip()))
-        return pairs
-    # 去掉 "Cookie:" 前缀（用户从 DevTools 直接复制整行时会有）
-    low = text
-    for prefix in ("cookie:", "Cookie:", "COOKIE:"):
-        if low.startswith(prefix):
-            low = low[len(prefix):]
-            break
-    # 允许整段是多行的（每行一对）
-    flat = " ".join(low.split("\n"))
-    for part in flat.split(";"):
-        if "=" not in part:
+
+    def add(k, v):
+        k = ("" if k is None else str(k)).strip()
+        if _valid_cookie_name(k):
+            pairs.append((k, _clean_cookie_value(v)))
+
+    # JSON：Cookie-Editor 之类扩展的「导出 / 复制为 JSON」
+    if text[0] in "[{":
+        try:
+            obj = json.loads(text)
+        except (ValueError, TypeError):
+            obj = None
+        if isinstance(obj, dict) and isinstance(obj.get("cookies"), list):
+            obj = obj["cookies"]
+        elif isinstance(obj, dict):
+            obj = [obj]
+        if isinstance(obj, list):
+            for it in obj:
+                if isinstance(it, dict):
+                    add(it.get("name") or it.get("Name"), it.get("value") or it.get("Value"))
+            if pairs:
+                return pairs
+
+    # 逐行判断：不能因为「整个文本里有 TAB」就把所有行都当 Netscape 处理
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
             continue
-        k, v = part.split("=", 1)
-        k, v = k.strip(), v.strip()
-        if k:
-            pairs.append((k, v))
+        if line.startswith("#") and not line.lower().startswith("#httponly_"):
+            continue
+        if "\t" in line:
+            cols = [c.strip() for c in line.split("\t")]
+            # Netscape：7 列、首列像域名、第 6 列是 Cookie 名
+            if len(cols) >= 7 and ("." in cols[0] or cols[0].lower().startswith("#httponly_")):
+                add(cols[5], cols[6])
+            elif len(cols) >= 2:
+                # 表格复制：第一列名称，第二列值，后面是 Domain / Path 等
+                add(cols[0], cols[1])
+            continue
+        # 请求头形式（每行独立处理，避免多行无分号时被粘成一个值）
+        line = re.sub(r"^cookie\s*:\s*", "", line, flags=re.I)
+        for part in line.split(";"):
+            if "=" in part:
+                k, v = part.split("=", 1)
+                add(k, v)
+                continue
+            # DevTools 表格的另两种复制变体：Name: Value / Name    Value
+            m = re.match(r"^([A-Za-z_][A-Za-z0-9_.\-]*)\s*[:\s]\s*(.+)$", part.strip())
+            if m:
+                add(m.group(1), m.group(2))
     return pairs
 
 
+def detect_cookie_format(text: str) -> str:
+    """判断粘贴内容像哪种格式，只用于给用户更准确的诊断提示。
+
+    取值：empty / header / table / netscape / json / unknown
+    """
+    s = (text or "").strip()
+    if not s:
+        return "empty"
+    if s[0] in "[{":
+        try:
+            json.loads(s)
+            return "json"
+        except (ValueError, TypeError):
+            pass
+    for raw in s.splitlines():
+        line = raw.strip()
+        if not line or (line.startswith("#") and not line.lower().startswith("#httponly_")):
+            continue
+        if "\t" in line:
+            cols = [c.strip() for c in line.split("\t")]
+            if len(cols) >= 7 and ("." in cols[0] or cols[0].lower().startswith("#httponly_")):
+                return "netscape"
+            return "table"
+        return "header"
+    return "unknown"
+
+
+def normalize_cookie_text(text: str) -> str:
+    """把任意粘贴格式统一成 "a=b; c=d"，供 HTTP Cookie 请求头直接使用。
+
+    表格 / JSON / Netscape 原文不能直接塞进 Header（含 TAB、引号、换行会变成非法头）。
+    """
+    return "; ".join(f"{k}={v}" for k, v in parse_cookie_text(text))
+
+
 def cookie_summary(text: str) -> dict:
-    """给前端看的 Cookie 概况：有几项、是不是登录态、有没有关键字段"""
+    """给前端看的 Cookie 概况：识别了几项、什么格式、是不是登录态。
+
+    format 用于区分「格式问题」和「Cookie 内容问题」——这两类失败的自救方式完全不同。
+    """
     pairs = parse_cookie_text(text)
     names = [k for k, _ in pairs]
-    has_login = any(n in names for n in ("SESSDATA", "sessionid", "sessionid_ss", "sid_tt", "web_session", "sid"))
+    login_keys = [n for n in ("SESSDATA", "sessionid", "sessionid_ss", "sid_tt", "web_session", "sid") if n in names]
     return {
         "count": len(pairs),
         "names": names[:20],
-        "has_login": has_login,
+        "has_login": bool(login_keys),
+        "login_keys": login_keys,
+        "format": detect_cookie_format(text) if pairs else "unknown",
         "empty": not pairs,
     }
 
@@ -671,14 +807,24 @@ def platform_keys_of(url: str) -> list:
 def verify_cookie(text: str, url: str = "") -> dict:
     """验证 Cookie 是否真的可用：拿目标平台解析一次，看返回结果。
 
-    返回 {ok, stage, message, detail}：
+    返回 {ok, stage, message, hint, summary}：
     - ok=True 表示 Cookie 生效（能拿到播放地址 / 登录态字段）
-    - stage 用于前端提示：empty / anonymous / auth / ok
+    - stage 用于前端提示：empty=格式问题 / anonymous=缺登录态 / auth=Cookie 可能失效 / ok
+    - hint 是按阶段给出的可操作自救建议，避免把三类问题混成一句「检查 Cookie」
     """
     pairs = parse_cookie_text(text)
     if not pairs:
-        return {"ok": False, "stage": "empty", "message": "没有解析到任何 Cookie 键值对",
-                "summary": cookie_summary(text)}
+        return {
+            "ok": False,
+            "stage": "empty",
+            "message": "没识别出任何 Cookie 项 —— 这是格式问题，不是 Cookie 失效",
+            "hint": (
+                "至少要带「名称=值」，例如 SESSDATA=xxxx；也可以粘 DevTools 表格里的 "
+                "「SESSDATA⇥\"xxxx\"」一行（⇥ 是 Tab）。只复制一串值、整页 HTML、"
+                "cURL 命令或截图文字都识别不了，请对照弹窗里的示例改一下格式。"
+            ),
+            "summary": cookie_summary(text),
+        }
 
     target = (url or "").strip()
     platforms = platform_keys_of(target) if target else list(COOKIE_DOMAINS.keys())
@@ -697,6 +843,7 @@ def verify_cookie(text: str, url: str = "") -> dict:
                 "ok": True,
                 "stage": "ok",
                 "message": "Cookie 可用：目标站点已成功解析",
+                "hint": "格式、登录态、真实解析都通过了，点「保存」即可。",
                 "summary": summary,
                 "probe": {
                     "with_cookie": info,
@@ -708,7 +855,14 @@ def verify_cookie(text: str, url: str = "") -> dict:
             return {
                 "ok": False,
                 "stage": "auth" if local_ok else "anonymous",
-                "message": f"Cookie 未能通过站点校验：{e}",
+                "message": f"站点没接受这份 Cookie：{e}",
+                "hint": (
+                    "格式和登录态都正常，问题更可能出在 Cookie 本身或网络上："
+                    "① Cookie 已过期/失效，重新登录目标站点后再复制一次；"
+                    "② 平台临时限流，稍后重试；③ 这条链接本身无法解析，换个链接再试。"
+                    if local_ok else
+                    "格式能识别，但缺登录态字段，站点因此拒绝了请求。请登录目标站点后重新复制完整 Cookie。"
+                ),
                 "summary": summary,
             }
         finally:
@@ -723,9 +877,15 @@ def verify_cookie(text: str, url: str = "") -> dict:
         "ok": local_ok,
         "stage": "ok" if local_ok else "anonymous",
         "message": (
-            "识别到登录态字段，已保存（建议再粘贴一个视频链接做一次真实验证）"
+            "格式识别正常，登录态字段也在"
             if local_ok
-            else "没有识别到登录态字段（如 sessionid / SESSDATA / web_session），可能是游客 Cookie，抖音/小红书通常解析不了"
+            else "格式识别正常，但没有登录态字段 —— 这是 Cookie 内容的问题，不是格式问题"
+        ),
+        "hint": (
+            "本地字段检查通过，但这不能证明 Cookie 真的有效。填一个该平台的视频链接再点「验证」，用真实解析结果确认。"
+            if local_ok else
+            "常见原因：①复制的是未登录状态的游客 Cookie；②复制时漏了关键行（B 站要 SESSDATA，小红书要 web_session）；"
+            "③在错误的域名下复制的。请重新登录后复制完整 Cookie，或对照弹窗示例确认格式。"
         ),
         "summary": summary,
     }

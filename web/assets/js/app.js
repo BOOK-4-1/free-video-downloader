@@ -80,15 +80,26 @@
 
   // 「导入 Cookie」弹窗统一由 header-ui.js 提供（含获取指引 + 验证 + 状态显示），
   // 这里只保留读写 localStorage 的小工具，避免两套实现互相覆盖。
+  let suppressCookieModalUntil = 0;
   window.__vgLastUrl = () => (els.input ? els.input.value.trim() : '');
-  window.__vgAfterCookieSaved = () => {
+  window.__vgAfterCookieSaved = (status) => {
     if (window.__vgSyncCookieState) window.__vgSyncCookieState();
-    const u = els.input ? els.input.value.trim() : '';
-    if (u) {
-      toast('Cookie 已保存，正在用新 Cookie 重新解析…', 'ok');
-      // setTimeout 让弹窗先完成关闭与焦点回收，再进入解析骨架屏
-      setTimeout(function () { doParse(u); }, 120);
+    const s = status || { count: 0, hasLogin: false };
+    // 保存后会自动重解析一次；若失败，15 秒内不要再自动弹出 Cookie 弹窗，
+    // 避免「保存 → 重解析失败 → 又弹窗」的连环弹窗
+    suppressCookieModalUntil = Date.now() + 15000;
+    if (!s.count) {
+      toast('已保存到本机，但格式没识别出来，这份内容不会生效；点右上角「导入 Cookie」对照示例修改', 'error');
+      return; // 格式都不对，重解析没有意义
     }
+    toast(
+      s.hasLogin
+        ? 'Cookie 已保存到本机（' + s.count + ' 项），页眉按钮已变为「Cookie 已导入」'
+        : '已保存到本机（' + s.count + ' 项），页眉按钮已变化；但缺登录态字段，可能仍解析失败',
+      s.hasLogin ? 'ok' : 'error'
+    );
+    const u = els.input ? els.input.value.trim() : '';
+    if (u) setTimeout(function () { doParse(u, { quiet: true }); }, 120);
   };
 
   function openCookieModal() {
@@ -101,7 +112,8 @@
     els.form.classList.toggle('has-value', !!els.input.value.trim());
   }
 
-  async function doParse(url) {
+  async function doParse(url, opts) {
+    const quiet = !!(opts && opts.quiet);
     const raw = (url != null ? url : els.input.value).trim();
     if (!raw) {
       toast('先粘贴一个视频链接', 'error');
@@ -129,9 +141,21 @@
       }
       els.root.scrollIntoView({ behavior: 'smooth', block: 'center' });
     } catch (e) {
-      els.root.hidden = true;
-      toast(e.message, 'error');
-      if (/cookie/i.test(e.message)) setTimeout(openCookieModal, 600);
+      if (quiet) {
+        // 保存 Cookie 后的自动重解析：保存提示已经发过一条 toast，
+        // 这里只在结果区放一条静态说明，不再叠加第二条 toast、也不再弹窗
+        els.root.hidden = false;
+        els.root.innerHTML =
+          '<div class="notice"><div><b>Cookie 已保存。</b>这次自动重新解析没成功：' +
+          esc(e.message) + '。可以手动点「解析」重试，或换一条链接。</div></div>';
+      } else {
+        els.root.hidden = true;
+        toast(e.message, 'error');
+        // 刚保存过 Cookie 时不要再自动弹一次导入弹窗（否则用户会看到「弹两次」）
+        if (/cookie/i.test(e.message) && Date.now() > suppressCookieModalUntil) {
+          setTimeout(openCookieModal, 600);
+        }
+      }
     } finally {
       els.parseBtn.disabled = false;
       els.parseBtn.textContent = '解析';
@@ -214,6 +238,7 @@
             ${d.description ? `<p class="media-desc">${esc(d.description)}</p>` : ''}
             <div class="media-actions">
               <button class="btn btn-sm" id="copyTitleBtn">复制标题</button>
+              <button class="btn btn-sm" id="aiNoteBtn" data-url="${esc(d.url)}">AI 总结</button>
               <a class="btn btn-sm" href="${esc(d.url)}" target="_blank" rel="noopener">原页面</a>
             </div>
           </div>
@@ -393,9 +418,14 @@
   async function startBatch(d, picked) {
     const items = d.items.filter((it) => picked.has(it.index) && it.url).map((it) => ({ url: it.url, title: it.title }));
     if (!items.length) return toast('请先勾选要下载的视频', 'error');
-    const btn = $('#batchBtn');
-    btn.disabled = true;
-    btn.textContent = '提交中…';
+    // 合集页的按钮是 #batchBtn，单视频页「批量下载全部分 P」是 #partsBtn：
+    // 两个入口共用本函数，必须做空值保护，否则 parts 入口会直接抛 TypeError。
+    const btn = $('#batchBtn') || $('#partsBtn');
+    const label = btn ? btn.textContent : '';
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = '提交中…';
+    }
     try {
       const res = await api('/api/download/batch', {
         method: 'POST',
@@ -414,8 +444,10 @@
     } catch (e) {
       toast(e.message, 'error');
     } finally {
-      btn.disabled = false;
-      btn.textContent = '批量下载所选';
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = label;
+      }
     }
   }
 

@@ -1,8 +1,10 @@
 # 秒下 VideoGrab · 万能视频下载网站
 
-> 粘贴一个链接，把全网视频存到本地。B 站、抖音、小红书、快手、微博、YouTube 等 1700+ 站点，一条链接搞定。
+> 粘贴一个链接，把全网视频存到本地，还能让 AI 把它读成一份带时间戳的笔记。B 站、抖音、小红书、快手、微博、YouTube 等 1700+ 站点，一条链接搞定。
 
 基于开源项目 [yt-dlp](https://github.com/yt-dlp/yt-dlp) 搭建的轻量视频下载站：**单进程 FastAPI 后端 + 零构建纯前端**（HTML / CSS / 原生 JS），没有数据库、没有 node_modules、没有 Redis，解压即跑。
+
+下载之外还带一个 **AI 视频总结**：读平台字幕，生成「一句话概览 + 核心知识要点 + 时间戳章节 + 多层思维导图」，边生成边显示，可导出 Markdown / Word / PDF / 导图 SVG。模型走任意 OpenAI 兼容端点（云端或本地 Ollama 均可），密钥只留在服务端。
 
 ---
 
@@ -39,12 +41,15 @@
 | **合集 / 多 P 批量下载** | 粘贴合集或分 P 链接，勾选后一次提交，逐条进度条，可整批打包成 zip |
 | **整段分享文案** | 抖音、小红书那种「7.94 复制打开抖音…」一长段话，直接整段粘贴，自动抠出链接 |
 | **在线预览** | 下载前后都能在页面里直接播放确认，不用先落盘 |
-| **Cookie 导入** | 页面右上角「导入 Cookie」，支持请求头 / Netscape cookie.txt，可先用真实链接验证再保存；只存本机浏览器 |
+| **AI 视频总结** | 解析结果卡上点「AI 总结」：读平台字幕生成大纲、核心要点、时间戳章节与思维导图，**流式输出**边生成边看；导出 Markdown / Word / PDF / 导图 SVG 全部前端生成 |
+| **不重复计费** | 同一视频（同一登录态、同一风格）1 小时内重复打开直接复用上次结果；关掉面板、去下载再回来会接回进行中的任务，不会重新调用模型 |
+| **Cookie 导入** | 页面右上角「导入 Cookie」，支持请求头 / DevTools 表格 / Netscape / JSON，只粘值也能一键生成；先用真实链接验证再保存，只存本机浏览器 |
 | **自动清理** | 临时文件 30 分钟自动删除，不占硬盘 |
 
 ### 界面
 
 - 首页：链接解析主流程 + 功能说明 + 使用步骤 + 会员方案 + 常见问题
+- AI 总结面板：笔记 / 思维导图两个 tab，带进度、活体字数、导出工具条
 - 卡密兑换页：`VG-XXXX-XXXX-XXXX` 格式卡密兑换（当前为前端演示）
 - 视觉：极简白底 + 单一蓝色主色 `#1777FF` + 超大圆角胶囊 + 细 ring 边框 + 大留白
 
@@ -129,6 +134,47 @@ ffmpeg -version
 | `PARSE_TIMEOUT` | `45` | 单次解析超时秒数 |
 | `PLAYLIST_MAX` | `50` | 合集最多列出多少条 |
 
+### 5. 配置 AI 总结（可选）
+
+不配置也能用，下载功能完全不受影响；只是点「AI 总结」时会提示你先配置模型。
+
+```bash
+# 1) 复制配置模板
+cp .env.example .env          # Windows: copy .env.example .env
+
+# 2) 填三行就够（任意 OpenAI Chat Completions 兼容服务）
+AI_BASE_URL=https://api.deepseek.com/v1
+AI_API_KEY=sk-xxxxxxxx
+AI_MODEL=deepseek-chat
+```
+
+> `AI_BASE_URL` 要带版本段（多数供应商是 `/v1`）。填成 `https://api.deepseek.com` 会 404。
+
+只想用本地模型（Ollama / LM Studio）时，把上面三行留空，改填：
+
+```bash
+AI_FALLBACK_BASE_URL=http://127.0.0.1:11434/v1
+AI_FALLBACK_MODEL=qwen2.5:7b
+```
+
+云端 + 本地都填时是「云端优先、失败自动切本地」——这样可以既享受云端质量，又不怕断网或余额不足。
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `AI_BASE_URL` | 空 | 主端点，OpenAI 兼容地址，需带 `/v1` 这类版本段 |
+| `AI_API_KEY` | 空 | 主端点密钥，只从服务端读，绝不下发浏览器 |
+| `AI_MODEL` | 空 | 主端点模型名 |
+| `AI_FALLBACK_BASE_URL` | 空 | 本地兜底端点（Ollama / LM Studio） |
+| `AI_FALLBACK_MODEL` | 空 | 本地兜底模型名 |
+| `AI_TIMEOUT` | `120` | 单次模型调用超时秒数 |
+| `AI_MAX_CHARS` | `12000` | 每次喂给模型的最大字幕字符数，长视频会自动分段 |
+| `AI_MAX_SEGMENTS` | `12` | 最多分几段；超出会等距抽样（笔记里会注明） |
+| `AI_NOTE_TTL` | `3600` | 笔记结果复用时长（秒）。只存内存，重启失效 |
+| `SUBTITLE_TTL` | `1800` | 字幕正文缓存时长（秒） |
+| `SUBTITLE_CACHE_MAX` | `50` | 字幕缓存最多几条 |
+
+改完 `.env` 需要重启服务才生效。`.env` 已在 `.gitignore` 里，不会被提交。
+
 ---
 
 ## 三、使用方法
@@ -172,6 +218,34 @@ Cookie 只保存在**你本机浏览器的 localStorage**，除了发给你自�
 
 **小红书特别注意**：分享链接里的 `/explore/<id>` 单独拿出来是取不到数据的，必须带上 `?xsec_token=...`。在网页版打开笔记后直接复制地址栏完整网址即可；只粘 id 时页面会给出提示，不会让你对着「解析失败」猜原因。
 
+### AI 视频总结
+
+解析出视频后，结果卡右侧点「AI 总结」，面板会从「读取字幕」开始实时显示进度，20 秒~几分钟不等（取决于视频长度和模型速度）。
+
+1. 面板顶部先显示字幕情况：`N 段字幕 · 覆盖到 12:34` —— 覆盖到片尾说明字幕是完整的；
+2. 章节大纲出来后就先渲染出来，之后每整理完一段字幕，要点会继续追加到对应章节；
+3. 全部完成后解锁导出：**复制**、**Markdown**、**Word (.doc)**、**PDF**（走浏览器打印，选「另存为 PDF」）、**思维导图 SVG**；
+4. 切到「思维导图」tab 看知识结构图：按「核心概念 / 因果机制 / 证据案例 / 误区边界 / 应用延伸」重组，不是照抄章节；带 ◷ 的节点可以点回原片对应时间；
+5. 想换风格（详细 / 简明 / 大纲为主）或觉得内容不对，点「重新生成」强制重算。
+
+**支持范围**（一期只基于平台字幕，不做语音转写）：
+
+| 平台 | 能否总结 | 说明 |
+|---|---|---|
+| B 站 | 视字幕而定 | 需要登录 Cookie 才容易拿到字幕；优先取人工中文，其次平台 AI 字幕 |
+| TED / YouTube 等 | 有字幕即可 | 免 Cookie，自动字幕也支持（会标注「自动」） |
+| 抖音 / 小红书 | **暂不支持** | 这两个平台的内容没有字幕轨，一期不做语音转写 |
+| 其它站点 | 有字幕即可 | 具体看平台是否提供字幕 |
+
+**没有字幕怎么办**：面板会直接说明原因 —— B 站多半是没登录（右上角导入含 `SESSDATA` 的 Cookie 后重试即可），或者 UP 主没上传字幕、平台也没生成 AI 字幕。这类视频目前无法总结，不会拿错内容凑一份笔记。
+
+**关于费用与隐私**：
+
+- 每次总结 3~14 次模型调用：大纲 1 次 + 每段字幕追加 1 次 + 可能补 1 次空章 + 导图 1 次（19 分钟的 TED 实测 3 次，长视频按 `AI_MAX_SEGMENTS` 上限最多约 14 次）；
+- 同一视频（同一登录态、同一风格）1 小时内重复打开**不再调用模型**，直接用上次结果；
+- 字幕正文与笔记只放服务端内存，不落盘、不入库；Cookie 只发给**你自己启动的这个服务**；
+- 服务重启后内存缓存清空，需要重新生成。
+
 ### 会员 / 卡密（当前为前端演示）
 
 - 首页「会员」区块：免费版 / 会员版 / 团队版对比；
@@ -193,6 +267,11 @@ Cookie 只保存在**你本机浏览器的 localStorage**，除了发给你自�
 | GET | `/api/file/{id}?inline=1` | 取文件，`inline=1` 为在线预览 |
 | GET | `/api/thumb?url=` | 封面代理（绕过第三方防盗链） |
 | POST | `/api/cookies/verify` | 校验 Cookie：识别字段 / 用真实链接试解析 |
+| GET | `/api/ai/config` | AI 配置状态（模型名 / 是否就绪 / 是否配了兜底，**不回密钥**） |
+| POST | `/api/ai/subtitle` | 取字幕正文与轨道清单（调试用，不调用模型） |
+| POST | `/api/ai/summary` | 提交或复用 AI 总结任务，按「归一化 URL + 登录态 + 风格」幂等 |
+| GET | `/api/ai/summary/{id}` | 任务状态 / 进度 / 结果 |
+| GET | `/api/ai/summary/{id}/stream` | SSE 增量流（`after=N` 断线补发） |
 | GET | `/api/stats` | 站点数、已完成任务数、TTL、磁盘剩余 |
 
 启动后也可以直接打开 **http://127.0.0.1:8000/docs** 看自动生成的接口文档。
@@ -202,6 +281,11 @@ Cookie 只保存在**你本机浏览器的 localStorage**，除了发给你自�
 curl -X POST http://127.0.0.1:8000/api/parse \
   -H "Content-Type: application/json" \
   -d '{"url":"https://www.bilibili.com/video/BV1xx411c7mD"}'
+
+# 提交 AI 总结（返回 task_id，之后查 /api/ai/summary/{id} 或订阅 /stream）
+curl -X POST http://127.0.0.1:8000/api/ai/summary \
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://www.bilibili.com/video/BV1xx411c7mD","cookies":"SESSDATA=xxx","style":"detailed"}'
 ```
 
 ---
@@ -218,8 +302,11 @@ curl -X POST http://127.0.0.1:8000/api/parse \
 | [Pydantic](https://docs.pydantic.dev/) | FastAPI 依赖 | 请求体校验 |
 | [yt-dlp](https://github.com/yt-dlp/yt-dlp) | 2026.10.26 | 核心解析 / 下载引擎 |
 | [requests](https://requests.readthedocs.io/) | ≥2.32 | 抖音通道、直链下载 |
-| [httpx](https://www.python-httpx.org/) | 0.28 | 封面代理（异步） |
+| [httpx](https://www.python-httpx.org/) | 0.28 | 封面代理、字幕直连、AI 调用（含 SSE 流式） |
 | [FFmpeg](https://ffmpeg.org/) | 6.0 | 音视频合并、格式转换 |
+
+> AI 部分**没有引入任何新依赖**：不装 `openai` SDK，直接用已有的 `httpx` 打
+> `/chat/completions`；导出 Word / PDF / SVG 全部在前端做。
 
 ### 前端
 
@@ -229,16 +316,19 @@ curl -X POST http://127.0.0.1:8000/api/parse \
 | 原生 CSS | 单一 CSS 文件 + CSS 变量设计令牌，无预处理器 |
 | 原生 JavaScript (ES5+) | IIFE 封装，无框架、无打包、无依赖 |
 | Fetch API + 轮询 | 解析、下载、进度查询 |
+| `fetch` + `ReadableStream` | 读 AI 总结的 SSE 流，逐帧增量渲染；不可用时自动退回轮询 |
+| Blob / `@media print` | Markdown、Word(.doc)、导图 SVG、PDF 导出，全部在浏览器里生成 |
 | localStorage | Cookie 与会员状态仅存本机 |
 
 ### 存储与并发
 
 | 项 | 方案 |
 |---|---|
-| 数据库 | **不用**。任务状态放进程内存字典，文件放 `runtime/downloads` |
-| 消息队列 | **不用**。`concurrent.futures.ThreadPoolExecutor` 直接跑任务 |
-| 缓存 | **不用**。封面 1 小时 HTTP 缓存头即可 |
-| 过期清理 | 后台 asyncio 协程每 2 分钟扫一次，按 TTL 删文件、删任务 |
+| 数据库 | **不用**。下载任务、AI 任务、字幕缓存全在进程内存，成品文件放 `runtime/downloads` |
+| 消息队列 | **不用**。下载用 3 线程池、AI 用独立 2 线程池 `ThreadPoolExecutor` |
+| 缓存 | **不用**外部缓存。字幕正文 / 笔记结果放带 TTL 的内存字典 |
+| 进度推送 | AI 用 SSE（`asyncio.Queue` + `call_soon_threadsafe`），下载用 1 秒轮询 |
+| 过期清理 | 后台 asyncio 协程每 2 分钟扫一次，按 TTL 删文件、删任务、删笔记 |
 
 > 设计取向是「轻量、能跑、易读」：单机单进程，`python run.py` 起来就是一个完整站点。
 
@@ -249,24 +339,29 @@ curl -X POST http://127.0.0.1:8000/api/parse \
 ```
 free-video-downloader/
 ├─ app/
-│  ├─ config.py          # 路径、TTL、并发数、ffmpeg 定位
-│  ├─ downloader.py      # yt-dlp 封装：解析、清晰度归并、错误翻译、Cookie 转换
+│  ├─ config.py          # 路径、TTL、并发数、ffmpeg 定位、.env 加载、AI 配置
+│  ├─ downloader.py      # yt-dlp 封装：解析、清晰度归并、错误翻译、Cookie 解析
 │  ├─ douyin.py          # 抖音免登录通道（yt-dlp 的抖音提取器服务端必然 403，单独实现）
+│  ├─ bilibili.py        # B 站分 P 清单旁路补全（直连 view 接口）
+│  ├─ subtitle.py        # 字幕层：多格式解析、轨道选择、质量校验、B 站直连兜底、内存缓存
+│  ├─ summarizer.py      # AI 总结：OpenAI 兼容客户端、分段策略、时间线校正、导图、SSE 事件总线
 │  ├─ tasks.py           # 内存任务表 + 线程池 + 进度回调 + 过期清理
-│  ├─ api.py             # /api/* 全部接口
+│  ├─ api.py             # /api/* 全部接口（含 /api/ai/*）
 │  └─ main.py            # FastAPI 应用、页面路由、静态资源挂载、生命周期清理
 ├─ web/
 │  ├─ index.html         # 首页（下载主流程 + 功能 + 步骤 + 定价 + FAQ）
 │  ├─ store/index.html   # 卡密兑换页
 │  └─ assets/
-│     ├─ css/style.css   # 全部样式与设计令牌
+│     ├─ css/style.css   # 全部样式与设计令牌（含 AI 面板、导图、打印样式）
 │     ├─ js/app.js       # 下载主流程交互
-│     ├─ js/header-ui.js # Cookie 导入弹窗（两页共用）
+│     ├─ js/ai-note.js   # AI 总结面板：SSE 渲染、导图布局、5 种导出
+│     ├─ js/header-ui.js # Cookie 导入弹窗 + 格式诊断（两页共用）
 │     ├─ js/nav.js       # 导航高亮（两页共用）
 │     └─ img/favicon.svg
 ├─ tools/ffmpeg/         # ffmpeg.exe（可选，需自行放置）
 ├─ yt-dlp/               # yt-dlp 源码（可选，优先于 pip 安装的那份）
 ├─ runtime/              # 运行产物：下载文件、临时 Cookie（自动清理，不入库）
+├─ .env.example          # AI 配置模板（复制为 .env 后填写）
 ├─ requirements.txt
 └─ run.py                # 启动入口
 ```
@@ -293,6 +388,8 @@ free-video-downloader/
 
 > 抖音解析通道参考了其移动端分享页的公开页面结构（页面内联的播放地址），不含任何逆向签名或绕过付费的内容。
 
+> AI 部分只使用 [OpenAI Chat Completions 兼容协议](https://platform.openai.com/docs/api-reference/chat)，不绑定任何厂商，也不打包任何模型或 SDK。
+
 ---
 
 ## 七、已知限制
@@ -304,6 +401,11 @@ free-video-downloader/
 | 网络依赖 | 需要能访问目标平台。开发环境无法直连 `youtube.com`，此类链接会超时并给出中文提示 |
 | 抖音 | 免登录通道偶尔需同 Session 重试（已内置重试）；私密 / 仅好友可见内容仍下不了 |
 | 小红书 | 必须带 `xsec_token` 的链接 + 登录 Cookie；图文笔记本身没有视频，无法下载 |
+| AI 只读字幕 | 一期不做语音转写（ASR），抖音 / 小红书以及平台没字幕的视频**无法总结**，会明确说明原因 |
+| AI 质量取决于模型 | 建议用指令遵循好、上下文够长的模型。小模型可能返回不合规 JSON，页面会提示换模型；分段策略与时间码校正已尽量兜底 |
+| AI 结果只存内存 | 笔记与字幕缓存在进程内，1 小时（`AI_NOTE_TTL`）后或重启即失效；没有「我的笔记」历史 |
+| AI 成本 | 一次总结 3~14 次模型调用（视分段数而定），费用由你的模型供应商计；同一视频 1 小时内复用不重复计费 |
+| AI 与多 worker | 笔记索引与任务表都在进程内存，`--workers > 1` 会导致复用失效（本项目本来就要求单 worker） |
 | 付费 | 仅前端页面演示，未接真实支付 / 卡密校验 |
 | 移动端 | 本期只做桌面网页版，未做移动端适配 |
 | 非商用 | 见下方免责声明 |
@@ -314,6 +416,8 @@ free-video-downloader/
 
 - 本项目仅供 **个人学习、技术研究与自用备份**，不得用于任何商业用途或侵权传播。
 - 下载的内容版权归原作者及平台所有。请遵守目标网站的服务条款与当地法律法规，不要下载、传播无权获取的内容。
+- **AI 总结由大模型生成，可能存在遗漏、串改或事实错误**，仅供速览；关键结论请点时间戳回原片核对，不要把它当作逐字稿或权威笔记。
+- 使用 AI 功能产生的模型调用费用由你与模型供应商结算，本项目不代收、不代管密钥。
 - 请合理控制请求频率。高频批量抓取可能触发平台风控甚至封号，风险由使用者自行承担。
 - 使用本项目产生的任何后果由使用者自行负责。
 

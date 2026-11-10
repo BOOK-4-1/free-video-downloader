@@ -19,13 +19,15 @@ CLEAN_INTERVAL = 120  # 每 2 分钟清理一次过期文件
 
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
-    from app import tasks
+    from app import summarizer, tasks
 
     async def cleaner():
         while True:
             await asyncio.sleep(CLEAN_INTERVAL)
             try:
-                await asyncio.get_running_loop().run_in_executor(None, tasks.cleanup, config.FILE_TTL)
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(None, tasks.cleanup, config.FILE_TTL)
+                await loop.run_in_executor(None, summarizer.cleanup, config.AI_NOTE_TTL)
             except Exception:  # noqa: BLE001
                 pass
 
