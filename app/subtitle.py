@@ -239,7 +239,31 @@ def pick_track(tracks):
     return usable[0]
 
 
-def no_subtitle_hint(url, has_cookie=False) -> str:
+# 这里不能 import downloader（downloader 已 import subtitle，会形成循环），
+# 用一份等价的轻量本地判断：B 站给游客也发 SESSDATA，登录后才有 DedeUserID。
+_BILI_NAME_RE = re.compile(r"(?:^|;\s*)([A-Za-z_][A-Za-z0-9_.\-]*)\s*=")
+
+
+def _looks_guest_bili(cookies_text: str) -> bool:
+    if not cookies_text:
+        return False
+    names = {m.group(1) for m in _BILI_NAME_RE.finditer(cookies_text)}
+    return "SESSDATA" in names and "DedeUserID" not in names
+
+
+def bili_guest_tip(cookies_text: str) -> str:
+    """给「10 次都没拿到字幕」补一句可操作的原因，避免把游客态误判成视频无字幕。"""
+    if not _looks_guest_bili(cookies_text):
+        return ""
+    return (
+        "；另外这份 Cookie 只有 SESSDATA、缺 DedeUserID，B 站很可能把它当游客而不下发 "
+        "AI 字幕 —— 请重新登录 B 站，复制 F12 → Network → Request Headers 里的 Cookie 整段"
+        "（含 DedeUserID / DedeUserID__ckMd5 / SESSDATA / bili_jct），重新解析后清晰度出现 "
+        "720P / 1080P 才算生效"
+    )
+
+
+def no_subtitle_hint(url, has_cookie=False, cookies_text="") -> str:
     """无字幕时给人话，不让人对着「解析失败」猜原因（沿用项目错误翻译表的风格）"""
     low = (url or "").lower()
     tail = "本期 AI 总结只基于字幕工作，暂不做语音转写。"
@@ -252,6 +276,14 @@ def no_subtitle_hint(url, has_cookie=False) -> str:
             return (
                 "这条 B 站视频没取到字幕。B 站字幕通常需要登录态：点右上角「导入 Cookie」粘贴含 "
                 "SESSDATA 的 Cookie 后重新解析再试；也可能是 UP 主未上传、平台也没生成 AI 字幕。" + tail
+            )
+        if _looks_guest_bili(cookies_text):
+            return (
+                "这条 B 站视频没取到字幕，但更可能是登录态问题：这份 Cookie 只有 SESSDATA、"
+                "缺 DedeUserID，B 站会当成游客，AI 字幕不下发。请重新登录 B 站，复制 "
+                "F12 → Network → Request Headers 里的 Cookie 整段（含 DedeUserID / "
+                "DedeUserID__ckMd5 / SESSDATA / bili_jct）后重新解析；清晰度出现 "
+                "720P / 1080P 才算生效。" + tail
             )
         return "这条 B 站视频没有可用字幕（UP 主未上传、平台也没生成 AI 字幕），" + tail
     return "这条视频没有可用的字幕轨，" + tail
@@ -470,13 +502,14 @@ def fetch_bilibili_direct(url, cookies_text="", on_progress=None) -> tuple:
     except Exception as e:  # noqa: BLE001
         return None, type(e).__name__
 
+    guest_tip = bili_guest_tip(cookies_text)
     if worst is None:
-        return None, "平台没返回可用字幕轨"
+        return None, ("平台没返回可用字幕轨（B 站 AI 字幕需要登录态）" + guest_tip)
     return None, (
         f"平台连续 {BILI_SUBTITLE_ATTEMPTS} 次返回的 AI 字幕都和这条视频对不上"
         f"（最好的一份只到 {worst['end_text']}，视频时长 {_mmss(duration)}）。"
         "这通常是 B 站临时限流，稍等半分钟再点一次 AI 总结；"
-        "如果一直这样，试试在右上角导入完整登录信息后重试。"
+        "如果一直这样，试试在右上角导入完整登录信息后重试。" + guest_tip
     )
 
 
@@ -623,7 +656,7 @@ def resolve(url, has_cookie=False, cookies_text="", cookie_file="", info=None,
         elif load_error and not _known_no_subtitle(url):
             result["reason"] = f"暂时没法判断这条视频有没有字幕：{load_error}。请检查网络或换个链接重试"
         else:
-            result["reason"] = no_subtitle_hint(url, has_cookie)
+            result["reason"] = no_subtitle_hint(url, has_cookie, cookies_text)
         return result
 
     raw = picked.get("data") or ""
@@ -634,7 +667,7 @@ def resolve(url, has_cookie=False, cookies_text="", cookie_file="", info=None,
             result["reason"] = f"字幕地址取不到内容（{type(e).__name__}），可能是链接失效或需要登录态 Cookie"
             return result
     if not raw:
-        result["reason"] = no_subtitle_hint(url, has_cookie)
+        result["reason"] = no_subtitle_hint(url, has_cookie, cookies_text)
         return result
 
     # HLS 字幕（TED 等）：字幕 URL 指向 m3u8 播放列表，需并发取回所有 vtt 分片再合并

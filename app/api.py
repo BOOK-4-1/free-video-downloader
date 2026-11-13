@@ -11,7 +11,7 @@ import os
 import threading
 import time
 import uuid
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import httpx
 from fastapi import APIRouter, Body, HTTPException, Query
@@ -81,8 +81,10 @@ class CookieReq(BaseModel):
 async def verify_cookies(req: CookieReq = Body(...)):
     """校验用户粘贴的 Cookie 是否真的能用，返回可读的结论。
 
-    - 只粘贴 Cookie：做本地字段校验（是否含登录态字段）
-    - 同时给 url：直接拿这个链接真解析一次，用结果说话
+    - 只粘贴 Cookie：本地字段校验（是否含登录态字段、B 站是否疑似游客态）
+    - 同时给 url：真解析一次 + 与匿名结果对比；B 站还会问一次 nav 的 isLogin，
+      挡住「游客态也能解析出 360P/480P」造成的假阳性（stage=guest）
+    - 登录态接口不通时只给 warning，不判用户 Cookie 无效
     """
     loop = asyncio.get_running_loop()
     result = await loop.run_in_executor(None, lambda: downloader.verify_cookie(req.cookies, req.url))
@@ -305,34 +307,83 @@ async def get_file(task_id: str, inline: bool = Query(False), name: str = Query(
     )
 
 
+# 取图失败时返回可见占位（原来的 1x1 透明像素只会让用户看到一块灰色，无法判断原因）。
+# 不缓存：一旦图床恢复或策略调整，刷新即可生效。
+_THUMB_EMPTY_SVG = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 360">
+<rect width="640" height="360" fill="#f1f5f9"/>
+<g fill="none" stroke="#cbd5e1" stroke-width="5" stroke-linejoin="round">
+<rect x="258" y="116" width="124" height="96" rx="12"/>
+<circle cx="294" cy="146" r="9"/>
+<path d="M266 202l34-34 26 26 22-20 26 28"/>
+</g>
+<text x="320" y="264" text-anchor="middle" font-family="sans-serif" font-size="18" fill="#94a3b8">封面暂不可用</text>
+</svg>""".encode("utf-8")
+
+
+def _thumb_referers(url: str):
+    """按图床域名选优先 Referer；第二个候选为空，覆盖「禁止带 Referer」的 CDN。"""
+    host = (urlparse(url).hostname or "").lower()
+    if "hdslb" in host or "bilibili" in host:
+        return ["https://www.bilibili.com/", ""]
+    if any(k in host for k in ("douyin", "snssdk", "ixigua", "bytecdntp")):
+        return ["https://www.douyin.com/", ""]
+    if any(k in host for k in ("xhscdn", "xiaohongshu")):
+        return ["https://www.xiaohongshu.com/", ""]
+    p = urlparse(url)
+    return [f"{p.scheme}://{p.netloc}/", ""]
+
+
 @router.get("/thumb")
 async def thumb(url: str = Query(...)):
-    """缩略图代理：绕过 B 站/抖音等图床的防盗链"""
-    if not url.startswith("http"):
+    """缩略图代理：绕过 B 站/抖音等图床的防盗链。
+
+    yt-dlp 的 B 站 extractor 常返回 http:// 图床地址；实测服务进程内请求该 http
+    地址稳定失败、换成 https 正常，因此 http 一律优先升级为 https，失败再回退原地址。
+    每个候选再各试「带 Referer / 不带 Referer」，覆盖不同 CDN 的防盗链策略。
+    """
+    if not url.lower().startswith(("http://", "https://")):
         raise HTTPException(400, "无效的图片地址")
-    headers = {
+
+    candidates = []
+    if url.startswith("http://"):
+        candidates.append("https://" + url[7:])
+    candidates.append(url)
+
+    base_headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36",
-        "Referer": "https://www.bilibili.com/",
         "Accept": "image/avif,image/webp,image/*,*/*;q=0.8",
     }
+    last_err = None
     try:
         async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
-            r = await client.get(url, headers=headers)
-            r.raise_for_status()
-            return Response(
-                content=r.content,
-                media_type=r.headers.get("content-type", "image/jpeg"),
-                headers={"Cache-Control": "public, max-age=3600"},
-            )
-    except Exception:  # noqa: BLE001
-        # 返回 1x1 透明像素，避免前端满屏碎图标
-        return Response(
-            content=bytes.fromhex(
-                "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
-                "0000000a49444154789c6300010000050001"
-            ),
-            media_type="image/png",
-        )
+            for candidate in candidates:
+                for ref in _thumb_referers(url):
+                    headers = dict(base_headers)
+                    if ref:
+                        headers["Referer"] = ref
+                    try:
+                        r = await client.get(candidate, headers=headers)
+                        r.raise_for_status()
+                        ctype = r.headers.get("content-type", "image/jpeg").split(";")[0].strip()
+                        # 有些 CDN 被拒时返回 200 + HTML，必须挡掉，否则前端还是碎图
+                        if not ctype.startswith("image/") or len(r.content) < 100:
+                            raise ValueError(f"非图片响应 {ctype} / {len(r.content)}B")
+                        return Response(
+                            content=r.content,
+                            media_type=ctype,
+                            headers={"Cache-Control": "public, max-age=3600"},
+                        )
+                    except Exception as e:  # noqa: BLE001
+                        last_err = e
+    except Exception as e:  # noqa: BLE001
+        last_err = e
+
+    print(f"[thumb] 取图失败 url={url[:120]} err={type(last_err).__name__}: {last_err}", flush=True)
+    return Response(
+        content=_THUMB_EMPTY_SVG,
+        media_type="image/svg+xml",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -390,6 +441,45 @@ async def ai_subtitle(req: AiSubtitleReq = Body(...)):
         )
     except asyncio.TimeoutError:
         raise HTTPException(504, "取字幕超时，该平台可能被网络限制，换个链接试试") from None
+    return {"success": True, "data": data}
+
+
+class AiLookupReq(BaseModel):
+    url: str
+    cookies: str = ""
+    style: str = "detailed"
+
+
+@router.post("/ai/lookup")
+async def ai_lookup(req: AiLookupReq = Body(...)):
+    """只读探测：这条视频（同一登录态 + 同一风格）是否已有可复用的 AI 笔记。
+
+    与 POST /api/ai/summary 的区别 —— 本接口**绝不创建任务、不调用模型、不落临时 Cookie 文件**，
+    只供前端在「解析成功后」决定右栏是秒开缓存、接回进行中的任务，还是显示「一键生成」。
+    Cookie 原文只用于算登录态指纹，走请求体，不进 URL / 日志 / 响应。
+    """
+    urls = downloader.extract_urls(req.url)
+    if not urls:
+        raise HTTPException(400, "没有识别到有效链接")
+    norm_cookies = downloader.normalize_cookie_text(req.cookies)
+    hit = summarizer.find_by_key(summarizer.cache_key(urls[0], norm_cookies, req.style))
+    status = hit["status"] if hit else "none"
+    found = status in ("queued", "running", "done")
+    data = {
+        "found": found,
+        "status": status,
+        "summarizer_ready": summarizer.is_ready(),
+    }
+    if found:
+        data.update({
+            "id": hit["id"],
+            "percent": hit["percent"],
+            "message": hit["message"],
+            "partial": hit["partial"],
+            "result": hit["result"] if status == "done" else None,
+            # 前端 ago() 按毫秒算，服务端 _now() 是秒
+            "at_ms": int((hit["finished_at"] or hit["created_at"]) * 1000),
+        })
     return {"success": True, "data": data}
 
 

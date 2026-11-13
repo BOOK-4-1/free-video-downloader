@@ -194,6 +194,32 @@ main[id], section[id] { scroll-margin-top: calc(var(--header-h) + 16px); }
   color: var(--text-2);
   max-width: 620px;
 }
+/* Hero 下方的 Cookie 引导：和搜索框同宽，弱化但可点 */
+.hero-cookie-tip {
+  display: flex; align-items: center; justify-content: center;
+  flex-wrap: wrap; gap: 6px 8px;
+  margin: 14px auto 0; padding: 9px 14px;
+  max-width: 700px;
+  border-radius: var(--radius-pill);
+  background: var(--primary-soft);
+  color: #33598f;
+  font-size: 12.5px; line-height: 1.6;
+  text-align: left;
+}
+.hero-cookie-tip > svg { flex: none; color: var(--primary); }
+.hero-cookie-tip span { flex: 1 1 340px; min-width: 0; }
+.hero-cookie-tip b { color: #17457f; }
+.hero-cookie-tip code {
+  padding: 0 4px; border-radius: 4px;
+  background: rgba(255, 255, 255, 0.72); font-size: 11.5px;
+}
+.hero-cookie-link {
+  flex: none;
+  border: 0; background: none; padding: 2px 0;
+  color: var(--primary); font-size: 12.5px; font-weight: 700;
+  cursor: pointer; white-space: nowrap;
+}
+.hero-cookie-link:hover { text-decoration: underline; text-underline-offset: 3px; }
 .hero-badge {
   display: inline-flex;
   align-items: center;
@@ -323,6 +349,7 @@ main[id], section[id] { scroll-margin-top: calc(var(--header-h) + 16px); }
 }
 .media-figure {
   position: relative;
+  margin: 0;               /* figure 默认 1em 40px，双栏 width:100% 时会左缩进并横向溢出 */
   width: 260px;
   flex-shrink: 0;
   aspect-ratio: 16 / 10;
@@ -331,6 +358,12 @@ main[id], section[id] { scroll-margin-top: calc(var(--header-h) + 16px); }
   background: var(--bg-img);
   box-shadow: 0 0 0 1px var(--ring-soft);
   cursor: pointer;
+}
+.thumb-empty {
+  position: absolute; inset: 0; z-index: 1;
+  display: grid; place-items: center;
+  font-size: 12px; color: var(--text-3);
+  letter-spacing: .02em;
 }
 .media-figure img {
   width: 100%; height: 100%; object-fit: cover;
@@ -879,6 +912,17 @@ main[id], section[id] { scroll-margin-top: calc(var(--header-h) + 16px); }
 .cookie-meta.err { color: #b91c1c; }
 .cookie-meta.err b { color: #b91c1c; }
 
+/* 已识别字段清单：只展示名称，绝不回显 Cookie 值 */
+.cookie-fields {
+  margin-top: 8px; padding: 8px 10px; border-radius: 8px;
+  background: #f8fafc; box-shadow: 0 0 0 1px var(--ring-soft) inset;
+  font-size: 11.5px; color: var(--text-2); line-height: 1.7;
+  word-break: break-all;
+}
+.cookie-fields b { color: var(--text-1); font-weight: 600; }
+.cookie-fields.warn { background: #fffbeb; box-shadow: 0 0 0 1px rgba(217, 119, 6, 0.28) inset; }
+.cookie-fields-warn { margin-top: 5px; color: #b45309; }
+
 /* 三步诊断：把「格式问题 / 缺登录态 / Cookie 失效」分开显示 */
 .cookie-diag {
   margin-top: 10px; padding: 10px 12px;
@@ -979,6 +1023,14 @@ main[id], section[id] { scroll-margin-top: calc(var(--header-h) + 16px); }
 .cookie-result.ok .cookie-diff, .cookie-result.ok .cookie-tip { color: #166534; }
 
 .cookie-secure { margin: 12px 0 0; font-size: 11.5px; color: #94a3b8; line-height: 1.6; }
+/* 环境自检：内置预览窗口存储受限时给出可复制给开发者的诊断信息 */
+.cookie-env {
+  margin: 8px 0 2px; padding: 7px 10px;
+  border-radius: var(--radius-xs);
+  background: #f8fafc; color: var(--text-3);
+  font-size: 11px; line-height: 1.6; word-break: break-all;
+}
+.cookie-env.warn { background: #fff7ed; color: #9a5b13; }
 
 /* 页脚副行 */
 .footer-sub { margin-top: 4px; color: #b8bfc9; }
@@ -1106,4 +1158,233 @@ main[id], section[id] { scroll-margin-top: calc(var(--header-h) + 16px); }
   #aiPrintHost h2 { font-size: 18pt; }
   #aiPrintHost h3 { font-size: 14pt; }
   #aiPrintHost a { color: #1777ff; text-decoration: none; }
+}
+
+/* ==========================================================================
+   解析结果工作台（2026-11-12）
+   单视频：左「视频信息 + 下载」/ 右「AI 总结」并排；合集仍是单栏全宽。
+   放大态：同一个面板 DOM 切 fixed，不重建、不中断 SSE、不重复调用模型。
+   ========================================================================== */
+.result-wrap.is-workspace { max-width: var(--maxw); }
+.workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 0.86fr) minmax(0, 1.34fr);
+  gap: 16px;
+  align-items: start;
+}
+.ws-left, .ws-right { min-width: 0; }
+.workspace .result-card { padding: 16px; }
+.workspace .media { flex-direction: column; gap: 12px; }
+.workspace .media-figure { width: 100%; aspect-ratio: 16 / 9; }
+.workspace .media-body { width: 100%; }
+.workspace .media-actions { margin-top: 12px; padding-top: 0; flex-wrap: wrap; }
+.workspace .media-actions .btn { flex: 1 1 auto; }
+.workspace .format-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.workspace .formats-head { flex-wrap: wrap; gap: 4px; }
+.workspace .download-bar { gap: 10px; }
+.workspace .download-bar .hint { flex-basis: 100%; min-width: 0; }
+.workspace .download-bar .btn { width: 100%; }
+.workspace .parts-bar .btn { width: 100%; }
+.workspace .sk-figure { width: 100%; aspect-ratio: 16 / 9; }
+
+/* AI 面板：内联常驻 */
+.ai-panel {
+  width: 100%;
+  height: min(70vh, 660px);
+  max-height: none;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: #fff;
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-card);
+}
+.ai-panel.is-expanded {
+  position: fixed;
+  top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+  width: min(960px, calc(100vw - 32px));
+  height: 88vh;
+  max-height: 88vh;
+  z-index: 160;
+  box-shadow: var(--shadow-pop);
+}
+.ai-backdrop {
+  position: fixed; inset: 0; z-index: 155;
+  background: rgba(15, 23, 42, 0.32);
+  backdrop-filter: blur(2px);
+}
+body.ai-expanded-open { overflow: hidden; }
+.ai-head-actions { display: flex; align-items: center; gap: 6px; margin-left: auto; flex: none; }
+.ai-expand {
+  min-width: 44px; height: 30px; padding: 0 10px;
+  border: 0; background: #f5f7fa; border-radius: var(--radius-pill);
+  font-size: 12px; color: var(--text-2); cursor: pointer;
+  white-space: nowrap;
+}
+.ai-expand:hover { background: #eef2f7; color: var(--primary); }
+.ai-head-actions .ai-close { margin-left: 0; }
+
+/* 未生成时的空状态 */
+.ai-panel .ai-body { position: relative; }
+.ai-idle {
+  position: absolute; inset: 0;
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  gap: 10px; padding: 20px; text-align: center;
+}
+.ai-idle-ico {
+  width: 46px; height: 46px; border-radius: 14px;
+  background: var(--primary-soft); color: var(--primary);
+  display: grid; place-items: center;
+}
+.ai-idle h4 { margin: 0; font-size: 15px; font-weight: 800; color: var(--text); }
+.ai-idle p { margin: 0; max-width: 400px; font-size: 12.5px; color: var(--text-2); line-height: 1.75; }
+.ai-idle .btn { margin-top: 6px; }
+.ai-idle-meta { font-size: 11.5px; color: var(--text-3); line-height: 1.7; }
+.ai-cookie-state {
+  max-width: 400px; padding: 7px 10px;
+  border-radius: var(--radius-sm);
+  font-size: 11.5px; line-height: 1.6; text-align: left;
+  background: #fff7ed; color: #9a5b13;
+}
+.ai-cookie-state.ok { background: #f0fdf4; color: #15803d; }
+.ai-idle-tip {
+  font-size: 11.5px; color: #b45309; background: #fff7ed;
+  padding: 8px 12px; border-radius: var(--radius-sm); max-width: 400px; line-height: 1.7;
+}
+
+/* 章节拆解 tab：从 result.outline 前端渲染，零后端改动 */
+.ai-chapters { display: grid; gap: 12px; }
+.ai-chapter {
+  padding: 12px 14px; border-radius: var(--radius);
+  box-shadow: 0 0 0 1px var(--ring); background: #fff;
+}
+.ai-chapter-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ai-chapter-no {
+  width: 22px; height: 22px; border-radius: 50%; flex: none;
+  background: var(--primary-soft); color: var(--primary);
+  font-size: 11px; font-weight: 700; display: grid; place-items: center;
+}
+.ai-chapter-head h4 { margin: 0; font-size: 14px; font-weight: 700; color: var(--text); }
+.ai-chapter-time {
+  font-size: 11.5px; color: var(--primary); background: var(--primary-soft);
+  border-radius: var(--radius-pill); padding: 1px 8px; font-variant-numeric: tabular-nums;
+}
+a.ai-chapter-time:hover { text-decoration: underline; }
+.ai-chapter-points { margin: 8px 0 0; padding-left: 18px; display: grid; gap: 5px; }
+.ai-chapter-points li { font-size: 12.5px; line-height: 1.7; color: var(--text-2); }
+.ai-chapter-points a { color: var(--primary); font-variant-numeric: tabular-nums; margin-right: 6px; }
+.ai-chapter-empty { font-size: 12px; color: var(--text-3); }
+
+/* 导图：viewBox 按容器缩放；低于 720px 可读下限时保留横向滚动兜底
+   （原 min-width:940px 会让 700px 右栏与手机整条溢出，全缩到 0 又看不清字） */
+.ai-mindmap svg { min-width: 720px; }
+
+/* --------------------------------------------------------------------------
+   移动端 / 窄屏适配（2026-11-12 追加）
+   ≤1024 工作台堆叠；≤768 全页单列 + header 收敛；≤480 紧凑化 + 触摸目标
+   -------------------------------------------------------------------------- */
+@media (max-width: 1024px) {
+  .workspace { grid-template-columns: 1fr; }
+  .workspace .format-grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
+  .ai-panel { height: min(60vh, 560px); }
+  .ai-panel.is-expanded { height: 88vh; }
+}
+
+@media (max-width: 768px) {
+  .wrap { padding: 0 14px; }
+  /* 窄屏页眉改两行：第一行是品牌 + 完整的「导入 Cookie / 开通 VIP」，
+     第二行是导航（可横滑）。过去直接 display:none 掉这两个入口，用户找不到。 */
+  :root { --header-h: 88px; }
+  .header { height: auto; }
+  .header-inner {
+    height: auto; min-height: var(--header-h);
+    flex-wrap: wrap; align-content: center;
+    gap: 0 8px; padding: 8px 0 6px;
+  }
+  .brand { order: 1; }
+  .header-right { order: 2; margin-left: auto; gap: 6px; }
+  .nav {
+    order: 3; flex: 0 0 100%; width: 100%; min-width: 0;
+    margin-top: 6px; padding-bottom: 2px;
+  }
+  .nav a { padding: 6px 9px; font-size: 13px; }
+  .brand-name small { display: none; }
+
+  .hero { padding: 30px 0 8px; }
+  .hero h1 { font-size: 27px; }
+  .hero p { font-size: 14px; }
+  .hero p br { display: none; }
+  .hero-cookie-tip { font-size: 12px; padding: 9px 12px; text-align: center; }
+  .hero-cookie-tip span { flex-basis: 100%; }
+  .search-box { margin-top: 20px; }
+  .search-form { height: 50px; padding: 0 6px 0 14px; }
+  .search-form input { font-size: 16px; }
+  .search-form .btn { height: 36px; padding: 0 16px; }
+  .search-tips { font-size: 11.5px; }
+  .platform-strip { gap: 6px; margin-top: 16px; }
+  .chip { height: 25px; padding: 0 9px; font-size: 11px; }
+
+  .stats { grid-template-columns: repeat(2, 1fr); margin-top: 28px; }
+  .stat { padding: 14px 8px; }
+  .stat b { font-size: 20px; }
+  .section { padding: 44px 0 0; }
+  .section-head h2 { font-size: 22px; }
+  .section-head p { font-size: 13px; }
+  .feature-grid, .steps, .pricing { grid-template-columns: 1fr; }
+  .plan.featured { grid-column: span 1; }
+  .feature, .step, .plan { padding: 18px; }
+
+  .workspace { gap: 12px; }
+  .workspace .result-card { padding: 14px; }
+  .workspace .format-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .workspace .media-actions .btn { min-height: 38px; }
+  .playlist { max-height: 320px; }
+
+  .ai-panel { height: 520px; }
+  .ai-panel.is-expanded {
+    top: 0; left: 0; transform: none;
+    width: 100vw; height: 100vh; height: 100dvh;
+    max-height: none; border-radius: 0;
+  }
+  .ai-head { padding: 14px 14px 10px; }
+  .ai-progress { padding: 12px 14px 0; }
+  /* 7 个按钮在 375px 上换行会吃掉半屏，改成一条可横滑的工具条 */
+  .ai-toolbar {
+    padding: 10px 14px; gap: 6px;
+    flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch;
+  }
+  .ai-toolbar .grow { flex: 1 0 10px; }
+  .ai-toolbar .ai-tabs, .ai-toolbar .btn, .ai-tab { flex: none; white-space: nowrap; }
+  .ai-toolbar .btn { min-height: 34px; }
+  .ai-body { padding: 14px 14px 20px; }
+  .ai-tab { min-height: 34px; }
+  .ai-idle { overflow-y: auto; justify-content: flex-start; padding-top: 28px; }
+  .ai-mindmap svg { min-width: 720px; }
+
+  .modal { padding: 16px; }
+  .modal textarea { font-size: 16px; }
+  .modal-wide > h3 { padding: 14px 14px 10px; }
+  .modal-wide > .modal-scroll { padding: 12px 14px 4px; }
+  .modal-wide > .modal-foot { padding: 10px 14px 14px; flex-wrap: wrap; }
+  .modal-wide > .modal-foot .btn:first-child { margin-right: 0; }
+  .cookie-quick-row .cookie-quick-value { flex-basis: 100%; }
+
+  .footer { margin-top: 48px; }
+  .footer .links { gap: 10px; }
+  .toast-root { top: 66px; }
+}
+
+@media (max-width: 480px) {
+  .hero h1 { font-size: 23px; }
+  .hero p { font-size: 13px; }
+  .header-right .btn-sm { padding: 0 10px; }
+  .workspace .format-grid { gap: 6px; }
+  .format-item { padding: 8px 10px; }
+  .ai-toolbar .btn { height: 32px; padding: 0 10px; font-size: 12px; }
+  .ai-tab { padding: 6px 10px; }
+  .ai-chapter { padding: 10px 12px; }
+  .stats .stat span { font-size: 11px; }
 }

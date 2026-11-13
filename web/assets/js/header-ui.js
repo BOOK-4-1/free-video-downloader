@@ -16,6 +16,51 @@
   'use strict';
 
   var KEY = 'vg_cookie';
+  var BUILD = '20261112.2';   // 排障用：内嵌预览窗口可能加载到旧缓存脚本
+
+  /**
+   * 本机存储安全层。
+   * 内嵌预览窗口 / 第三方 iframe 常禁用或分区 localStorage，直接 getItem / setItem
+   * 会抛 SecurityError：保存分支会中途抛错、弹窗关不掉、后续提示与重解析全不执行，
+   * 用户看到的就是「填了 Cookie 却没生效」。这里先探测一次，不可用时全程降级到
+   * 模块内存（同页面会话内照样能解析和总结），并把环境状态显示出来，杜绝静默失败。
+   * app.js / ai-note.js 共用 window.__vgStore，保证三处读到的是同一份值。
+   */
+  var mem = {};
+  var storageOk = false;
+  try {
+    window.localStorage.setItem('__vg_probe__', '1');
+    storageOk = window.localStorage.getItem('__vg_probe__') === '1';
+    window.localStorage.removeItem('__vg_probe__');
+  } catch (e) { storageOk = false; }
+
+  var store = {
+    available: storageOk,
+    origin: (window.location && window.location.origin) || '',
+    build: BUILD,
+    get: function (k) {
+      if (storageOk) {
+        try { return window.localStorage.getItem(k) || ''; } catch (e) { /* 落到内存 */ }
+      }
+      return mem[k] || '';
+    },
+    set: function (k, v) {
+      v = String(v == null ? '' : v);
+      mem[k] = v;                       // 内存永远写，禁用存储也能完成本次会话
+      if (!storageOk) return false;
+      try { window.localStorage.setItem(k, v); return true; }
+      catch (e) { storageOk = false; store.available = false; return false; }
+    },
+    remove: function (k) {
+      delete mem[k];
+      if (!storageOk) return;
+      try { window.localStorage.removeItem(k); } catch (e) { /* ignore */ }
+    }
+  };
+  window.__vgStore = store;
+  window.__vgEnv = function () {
+    return { origin: store.origin, build: BUILD, storage: !!store.available, cookie: store.get(KEY) };
+  };
 
   var PLATFORM_HINTS = [
     {
@@ -172,6 +217,20 @@
     return { ok: true, text: n + '=' + v, name: n, value: v };
   }
 
+  /** B 站登录配套字段：游客也拿得到 SESSDATA，登录后才有 DedeUserID / bili_jct */
+  var BILI_LOGIN_FIELDS = ['DedeUserID', 'DedeUserID__ckMd5', 'bili_jct'];
+  function detectBiliGuest(text) {
+    var names = parseCookieNames(text);
+    var hasSess = names.indexOf('SESSDATA') >= 0;
+    var missing = BILI_LOGIN_FIELDS.filter(function (k) { return names.indexOf(k) < 0; });
+    return {
+      names: names,
+      isBili: hasSess,
+      missing: missing,
+      looksGuest: hasSess && missing.indexOf('DedeUserID') >= 0
+    };
+  }
+
   /**
    * 三步诊断：把「格式不对」「缺登录态」「Cookie 失效」明确分开，让用户知道该改什么。
    * verify 为 /api/cookies/verify 返回的 data（可为 null，表示还没验证）。
@@ -208,6 +267,7 @@
       key: 'format', label: '① 格式识别', state: 'ok',
       text: '识别到 ' + sum.count + ' 项（' + formatLabel(sum.format) + '）'
     };
+    d.guest = detectBiliGuest(raw);
     if (!sum.hasLogin) {
       d.tone = 'warn';
       d.headline = '卡在第 ② 步：格式没问题，但这份 Cookie 没有登录态字段 —— 多半复制了游客 Cookie，或漏了关键一行。不用改格式。';
@@ -225,6 +285,17 @@
       d.steps[2] = { key: 'validity', label: '③ 有效性', state: 'idle', text: '尚未验证，点「验证」用真实解析确认' };
     }
 
+    // B 站「有 SESSDATA 但缺 DedeUserID」本地就能判定疑似游客态，
+    // 不用等联网验证 —— 粘贴完立刻提示，避免用户以为保存成功就够了
+    if (d.guest && d.guest.looksGuest) {
+      d.steps[1] = {
+        key: 'login', label: '② 登录态字段', state: 'warn',
+        text: '有 SESSDATA，但缺 DedeUserID —— 多半是游客态 Cookie'
+      };
+      d.tone = 'warn';
+      d.headline = '有 SESSDATA 不等于已登录：这份 Cookie 缺 DedeUserID / bili_jct，B 站会按游客处理，高清与 AI 字幕都拿不到。请重新登录后复制完整 Cookie。';
+    }
+
     if (verify) {
       if (verify.ok) {
         d.tone = 'ok';
@@ -239,6 +310,17 @@
         d.tone = 'warn';
         d.headline = '第 ② 步没过：服务端确认格式正确但缺登录态字段，重新登录后复制完整 Cookie。';
         d.steps[1] = { key: 'login', label: '② 登录态字段', state: 'warn', text: '服务端确认：缺登录态字段' };
+      } else if (verify.stage === 'guest') {
+        d.tone = 'err';
+        d.headline = '第 ③ 步没过：这份 Cookie 不是 B 站登录态（游客态或已失效）。不用改格式、也不用换视频，要重新登录 B 站后复制完整 Cookie。';
+        d.steps[1] = {
+          key: 'login', label: '② 登录态字段', state: 'warn',
+          text: '有 SESSDATA，但缺 DedeUserID / bili_jct 等登录配套字段'
+        };
+        d.steps[2] = {
+          key: 'validity', label: '③ 有效性', state: 'err',
+          text: (verify.login && verify.login.checked ? 'B 站 nav 实测未登录（isLogin=false）' : '本地字段判定为疑似游客态')
+        };
       } else if (verify.stage === 'auth') {
         d.tone = 'err';
         d.headline = '卡在第 ③ 步：格式和登录态都正常，是 Cookie 本身没被站点接受 —— 多半已过期或失效，重新登录后再复制一次。';
@@ -250,7 +332,7 @@
 
   /** 页眉按钮显示当前状态 */
   function syncHeaderState() {
-    var saved = localStorage.getItem(KEY) || '';
+    var saved = store.get(KEY);
     var sum = quickSummary(saved);
     var btns = document.querySelectorAll('[data-action="cookie"]');
     for (var i = 0; i < btns.length; i++) {
@@ -274,7 +356,7 @@
 
   function openCookieModal(presetUrl) {
     if (document.getElementById('vgCookieMask')) return;
-    var saved = localStorage.getItem(KEY) || '';
+    var saved = store.get(KEY);
 
     var hintsHtml = PLATFORM_HINTS.map(function (p, i) {
       return (
@@ -324,6 +406,7 @@
         '<label class="cookie-label-input" for="vgCookieText">粘贴 Cookie</label>' +
         '<textarea id="vgCookieText" spellcheck="false" placeholder="a=b; c=d; ...（也支持整行 Cookie: ...、DevTools 表格复制的「名称+值」、Netscape cookie.txt、扩展导出的 JSON）"></textarea>' +
         '<div class="cookie-meta" id="vgCookieMeta">还没有粘贴内容</div>' +
+        '<div class="cookie-fields" id="vgCookieFields" hidden></div>' +
 
         '<div class="cookie-diag" id="vgCookieDiag">' +
           '<div class="cookie-diag-row" data-step="format"><i></i><b>① 格式识别</b><span></span></div>' +
@@ -362,6 +445,7 @@
 
         '<div class="cookie-result" id="vgCookieResult" hidden></div>' +
         '<p class="cookie-secure">Cookie 只存在你自己的浏览器里，随请求发给本机服务使用，不会上传到任何第三方。</p>' +
+        '<div class="cookie-env" id="vgCookieEnv"></div>' +
         '</div>' +
 
         '<div class="modal-foot">' +
@@ -388,6 +472,15 @@
     var quickMsg = mask.querySelector('#vgCookieQuickMsg');
     var lastVerify = null;
 
+    // 环境自检：内置预览窗口存储受限 / 加载到旧缓存脚本时，用户能直接看到原因
+    var envBox = mask.querySelector('#vgCookieEnv');
+    var env = window.__vgEnv ? window.__vgEnv() : {};
+    envBox.className = 'cookie-env' + (env.storage ? '' : ' warn');
+    envBox.textContent = '环境自检 · 页面来源 ' + (env.origin || '未知') +
+      ' · 本机存储' + (env.storage ? '可用' : '不可用（内嵌预览窗口常见限制）') +
+      ' · 前端版本 ' + (env.build || '?') +
+      (env.storage ? '' : '。Cookie 仅在本次页面有效，刷新后需重新导入；长期使用建议在外部浏览器打开 ' + (env.origin || '本地址'));
+
     ta.value = saved;
     if (presetUrl) urlInp.value = presetUrl;
 
@@ -413,6 +506,26 @@
         rows[i].querySelector('span').textContent = step.text;
       }
       if (d.showExamples) examples.open = true;
+
+      // 只展示字段名，绝不把值回显到页面上
+      var fieldBox = mask.querySelector('#vgCookieFields');
+      if (fieldBox) {
+        var g = detectBiliGuest(ta.value);
+        if (!g.names.length) {
+          fieldBox.hidden = true;
+          fieldBox.innerHTML = '';
+        } else {
+          fieldBox.hidden = false;
+          fieldBox.className = 'cookie-fields' + (g.looksGuest ? ' warn' : '');
+          var shown = g.names.slice(0, 12).join('、') + (g.names.length > 12 ? ' …' : '');
+          fieldBox.innerHTML = '<b>已识别字段（' + g.names.length + '）：</b>' + esc(shown) +
+            (g.looksGuest
+              ? '<div class="cookie-fields-warn">缺 ' + esc(g.missing.join(' / ')) +
+                ' —— 这通常是游客态 Cookie，B 站不会下发 AI 字幕。点「验证」可联网确认。</div>'
+              : '');
+        }
+      }
+
       // 格式失败时把用户粘的内容搬进「只粘值」小框：点一下「生成 Cookie」就能修好
       if (d.steps[0].state === 'err' && (ta.value || '').trim()) {
         if (!valInp.value.trim() || valInp.dataset.auto === '1') {
@@ -482,6 +595,12 @@
           var probe = d.probe || {};
           var withCookie = probe.with_cookie || {};
           var anon = probe.anonymous || {};
+          var loginLine = (d.login && d.login.checked)
+            ? '<div class="cookie-tip">B 站登录态实测：' + (d.login.is_login ? '已登录 ✓' : '未登录') + '</div>'
+            : '';
+          var warnLine = d.warning
+            ? '<div class="cookie-tip"><b>注意：</b>' + esc(d.warning) + '</div>'
+            : '';
 
           if (d.ok && probe.with_cookie) {
             var diff = '';
@@ -496,12 +615,13 @@
               '<b>✓ ' + esc(d.message) + '</b>' +
               (withCookie.title ? '<div>标题：' + esc(withCookie.title) + '</div>' : '') +
               (withCookie.uploader ? '<div>作者：' + esc(withCookie.uploader) + '</div>' : '') +
-              diff +
+              diff + loginLine + warnLine +
               '<div class="cookie-tip">确认无误后点「保存」，之后解析/下载会自动带上。</div>');
           } else if (d.ok) {
             showResult('ok',
               '<b>✓ ' + esc(d.message) + '</b>' +
               (d.hint ? '<div class="cookie-tip">' + esc(d.hint) + '</div>' : '') +
+              loginLine + warnLine +
               '<div class="cookie-tip">点「保存」后，解析和下载会自动带上这份 Cookie。</div>');
           } else {
             // 三类失败给三套完全不同的自救指引，不再笼统说「检查 Cookie」
@@ -509,11 +629,13 @@
             var titles = {
               empty: '格式问题：没识别出任何 Cookie 项',
               anonymous: 'Cookie 内容问题：缺登录态字段',
+              guest: '登录态问题：这份 Cookie 没被 B 站识别为已登录',
               auth: '有效性问题：站点没接受这份 Cookie'
             };
             var actions = {
               empty: '不用换 Cookie，请对照下方的「4 种能识别的格式」修改：至少要有「名称=值」；只粘一串值没有名称，识别不了。',
               anonymous: '格式是对的，不用改格式。请登录目标站点后重新复制完整 Cookie，确认包含 SESSDATA（B 站）/ web_session（小红书）/ sessionid（抖音）。',
+              guest: '不用改格式、也不用换视频。重新登录 bilibili.com，复制 F12 → Network → Request Headers 里的 Cookie 整段（含 DedeUserID / DedeUserID__ckMd5 / SESSDATA / bili_jct），保存后重新解析；清晰度出现 720P / 1080P 才算生效。',
               auth: '格式和登录态都正常，不用改格式。多半是 Cookie 已过期或失效：重新登录后再复制一次；也可能是平台临时限流，稍后重试。'
             };
             var s2 = d.summary || {};
@@ -560,7 +682,7 @@
       }
 
       if (act === 'clear') {
-        localStorage.removeItem(KEY);
+        store.remove(KEY);
         ta.value = '';
         lastVerify = null;
         refreshMeta();
@@ -572,21 +694,24 @@
       if (act === 'save') {
         var v = (ta.value || '').trim();
         if (!v) {
-          localStorage.removeItem(KEY);
+          store.remove(KEY);
           syncHeaderState();
           close();
           return toast('已清除本机保存的 Cookie', 'ok');
         }
         var s3 = quickSummary(v);
-        localStorage.setItem(KEY, v);
+        // 即使本机存储被禁用，内存里也已经写好了值，本次会话的解析 / AI 总结照常可用
+        var persisted = store.set(KEY, v);
         syncHeaderState();
         close();
         // 提示统一交给 app.js 发一条：以前这里和 __vgAfterCookieSaved 各发一条，
         // 格式不对时还会出现「已保存」与「没识别出来」自相矛盾的两条提示。
         if (window.__vgAfterCookieSaved) {
-          window.__vgAfterCookieSaved({ count: s3.count, hasLogin: s3.hasLogin });
+          window.__vgAfterCookieSaved({ count: s3.count, hasLogin: s3.hasLogin, persisted: persisted });
         } else {
-          toast('Cookie 已保存到本机（' + s3.count + ' 项）', 'ok');
+          toast(persisted
+            ? 'Cookie 已保存到本机（' + s3.count + ' 项）'
+            : 'Cookie 已在当前页面生效（本机存储不可用，刷新后需重新导入）', 'ok');
         }
       }
     });
@@ -611,6 +736,7 @@
   window.__vgOpenCookie = openCookieModal;
   window.__vgCookieSummary = quickSummary;
   window.__vgCookieDiagnosis = cookieDiagnosis;
+  window.__vgCookieGuest = detectBiliGuest;
   window.__vgCookieFormat = detectCookieFormat;
   window.__vgCookieBuild = buildCookieFromValue;
   window.__vgSyncCookieState = syncHeaderState;

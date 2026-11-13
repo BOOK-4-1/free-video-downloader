@@ -14,6 +14,8 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 
+import httpx
+
 from app import bilibili
 from app import config
 from app import douyin
@@ -804,13 +806,76 @@ def platform_keys_of(url: str) -> list:
     return [key] if key in COOKIE_DOMAINS else []
 
 
-def verify_cookie(text: str, url: str = "") -> dict:
-    """验证 Cookie 是否真的可用：拿目标平台解析一次，看返回结果。
+# B 站登录态的配套字段。游客访问也会拿到 SESSDATA，所以「有 SESSDATA」不等于
+# 「已登录」：登录后才有 DedeUserID / bili_jct，缺它们基本可判定是游客态。
+_BILI_LOGIN_FIELDS = ("DedeUserID", "DedeUserID__ckMd5", "bili_jct")
+_BILI_NAV_URL = "https://api.bilibili.com/x/web-interface/nav"
+_BILI_GUEST_HINT = (
+    "B 站给未登录的游客也会下发 SESSDATA，所以它「看起来像登录态」其实不是。"
+    "请在**同一个浏览器**先确认 bilibili.com 右上角是头像（已登录），再按 F12 → Network → "
+    "刷新 → 点任意请求 → 复制 Request Headers 里的 Cookie 整段，"
+    "至少包含 DedeUserID / DedeUserID__ckMd5 / SESSDATA / bili_jct；"
+    "别只从 Application 表格里挑一行。保存后重新解析，清晰度里出现 720P / 1080P 才算生效。"
+)
 
-    返回 {ok, stage, message, hint, summary}：
-    - ok=True 表示 Cookie 生效（能拿到播放地址 / 登录态字段）
-    - stage 用于前端提示：empty=格式问题 / anonymous=缺登录态 / auth=Cookie 可能失效 / ok
-    - hint 是按阶段给出的可操作自救建议，避免把三类问题混成一句「检查 Cookie」
+
+def bili_login_fields(cookies_text: str) -> dict:
+    """纯本地判断 B 站 Cookie 像不像游客态，不联网、零延迟。
+
+    供验证弹窗和「AI 总结没字幕」的错误文案共用；返回字段名清单（**不含值**）。
+    """
+    names = [k for k, _ in parse_cookie_text(normalize_cookie_text(cookies_text))]
+    missing = [k for k in _BILI_LOGIN_FIELDS if k not in names]
+    return {
+        "names": names,
+        "has_sessdata": "SESSDATA" in names,
+        "missing": missing,
+        "looks_guest": "SESSDATA" in names and "DedeUserID" in missing,
+    }
+
+
+def bilibili_login_check(cookies_text: str, timeout: float = 8.0) -> dict:
+    """联网确认 B 站是否认可这份 Cookie 为登录态（x/web-interface/nav）。
+
+    返回 {checked, is_login, code, fields, reason}。**checked=False 表示探测本身
+    失败**（超时 / 断网 / 响应异常），调用方绝不能据此判用户 Cookie 无效，
+    只能降级为本地字段提示，避免网络抖动误伤正常用户。
+    """
+    fields = bili_login_fields(cookies_text)
+    out = {"checked": False, "is_login": False, "code": None,
+           "fields": fields, "reason": ""}
+    norm = normalize_cookie_text(cookies_text)
+    if not norm:
+        out["reason"] = "empty"
+        return out
+    headers = {
+        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                       "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"),
+        "Referer": "https://www.bilibili.com/",
+        "Cookie": norm,
+    }
+    try:
+        with httpx.Client(timeout=timeout, follow_redirects=True) as client:
+            payload = client.get(_BILI_NAV_URL, headers=headers).json()
+        code = payload.get("code")
+        out["code"] = code
+        out["checked"] = isinstance(code, int)
+        out["is_login"] = bool(code == 0 and (payload.get("data") or {}).get("isLogin"))
+        if not out["is_login"]:
+            out["reason"] = "guest_or_expired" if fields["looks_guest"] else "not_logged_in"
+    except Exception as e:  # noqa: BLE001
+        out["reason"] = type(e).__name__
+    return out
+
+
+def verify_cookie(text: str, url: str = "") -> dict:
+    """验证 Cookie 是否真的可用。
+
+    返回 {ok, stage, message, hint, summary, probe, login, fields, warning}：
+    - stage: empty=格式 / anonymous=缺登录态 / guest=游客态 / auth=失效 / ok
+    - B 站会额外联网问一次 x/web-interface/nav 的 isLogin。只判断「能不能解析出
+      视频」会假阳性：游客态同样能解析出 360P/480P，却拿不到 AI 字幕与高清。
+      探测失败（checked=False）时绝不判死，只降级为本地字段 warning。
     """
     pairs = parse_cookie_text(text)
     if not pairs:
@@ -828,28 +893,61 @@ def verify_cookie(text: str, url: str = "") -> dict:
 
     target = (url or "").strip()
     platforms = platform_keys_of(target) if target else list(COOKIE_DOMAINS.keys())
+    is_bili = platform_keys_of(target) == ["bilibili"] if target else False
 
-    # 1) 先做纯本地校验：Cookie 里有没有「登录态」字段
+    # 1) 纯本地字段校验（只保留字段名，绝不把值放进响应）
     summary = cookie_summary(text)
     local_ok = summary["has_login"]
+    fields = bili_login_fields(text) if (is_bili or any(k == "SESSDATA" for k, _ in pairs)) else None
+    guest_like = bool(fields and fields["looks_guest"])
 
-    # 2) 有链接就真解析一次（这是唯一可信的验证方式）
+    # 2) B 站先做登录态探测：游客态直接秒回，既省掉两次 yt-dlp 解析，
+    #    也避免为一份无效 Cookie 再落一次明文临时文件。
+    login = None
+    if target and is_bili:
+        login = bilibili_login_check(normalize_cookie_text(text))
+        if login["checked"] and not login["is_login"]:
+            return {
+                "ok": False,
+                "stage": "guest",
+                "message": "B 站没把这份 Cookie 识别为登录态（游客态或已失效）",
+                "hint": _BILI_GUEST_HINT,
+                "summary": summary,
+                "probe": {},
+                "login": login,
+                "fields": fields,
+            }
+
+    warning = ""
+    if login and not login["checked"]:
+        warning = "登录态接口暂时没连上，本次只完成了解析验证；若仍拿不到高清或字幕，请稍后重点验证一次。"
+    elif guest_like:
+        warning = "这份 Cookie 缺 DedeUserID / bili_jct，像是游客态；高清与 AI 字幕仍可能拿不到。"
+
+    # 3) 有链接就真解析一次，并和「不带 Cookie」的结果对比
     if target:
         cookie_file = write_cookiefile(text, platforms)
         try:
             info = _probe(target, cookie_file)
             tmp = _probe(target, "")
+            probe = {
+                "with_cookie": info,
+                "anonymous": tmp,
+                "need_cookie": tmp.get("status") != "ok",
+            }
+            if not probe["need_cookie"] and not is_bili:
+                warning = ((warning + " ") if warning else "") + \
+                    "这条链接匿名也能解析，无法据此判断登录态；换个需要登录的链接验证会更准。"
             return {
                 "ok": True,
                 "stage": "ok",
-                "message": "Cookie 可用：目标站点已成功解析",
-                "hint": "格式、登录态、真实解析都通过了，点「保存」即可。",
+                "message": "Cookie 可用：目标站点已成功解析" if not warning else "解析通过，但有几项需要留意",
+                "hint": warning or "格式、登录态、真实解析都通过了，点「保存」即可。",
+                "warning": warning,
                 "summary": summary,
-                "probe": {
-                    "with_cookie": info,
-                    "anonymous": tmp,
-                    "need_cookie": tmp.get("status") != "ok",
-                },
+                "probe": probe,
+                "login": login,
+                "fields": fields,
             }
         except ParseError as e:
             return {
@@ -864,6 +962,8 @@ def verify_cookie(text: str, url: str = "") -> dict:
                     "格式能识别，但缺登录态字段，站点因此拒绝了请求。请登录目标站点后重新复制完整 Cookie。"
                 ),
                 "summary": summary,
+                "fields": fields,
+                "login": login,
             }
         finally:
             try:
@@ -872,7 +972,16 @@ def verify_cookie(text: str, url: str = "") -> dict:
             except OSError:
                 pass
 
-    # 3) 没有链接：只能凭字段判断（抖音/抖音国际版登录态一般是 sessionid / sid_tt）
+    # 4) 没有链接：只能凭字段判断。B 站「有 SESSDATA 但缺 DedeUserID」即可判定疑似游客态
+    if guest_like:
+        return {
+            "ok": False,
+            "stage": "guest",
+            "message": "有 SESSDATA，但缺 DedeUserID —— 看起来是游客态 Cookie",
+            "hint": _BILI_GUEST_HINT,
+            "summary": summary,
+            "fields": fields,
+        }
     return {
         "ok": local_ok,
         "stage": "ok" if local_ok else "anonymous",
@@ -888,6 +997,7 @@ def verify_cookie(text: str, url: str = "") -> dict:
             "③在错误的域名下复制的。请重新登录后复制完整 Cookie，或对照弹窗示例确认格式。"
         ),
         "summary": summary,
+        "fields": fields,
     }
 
 

@@ -62,9 +62,24 @@
   const esc = (s) =>
     String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
+  // 右栏 AI 面板由 ai-note.js 提供挂载/卸载；换链接、切合集、清空时必须先断 SSE，
+  // 否则上一条视频的笔记会串到下一条上（noteCache 键带 URL + Cookie 指纹，但流不会自己停）。
+  function unmountAi() {
+    if (window.__vgAiNote && window.__vgAiNote.unmount) window.__vgAiNote.unmount();
+  }
+  function mountAi(d) {
+    const host = $('#aiHost');
+    if (window.__vgAiNote && window.__vgAiNote.mount && host) {
+      window.__vgAiNote.mount(host, d.url, d.title);
+    }
+  }
+
   function thumbUrl(u) {
     if (!u) return '';
-    return '/api/thumb?url=' + encodeURIComponent(u);
+    // B 站等 extractor 常给出 http:// 图床地址，服务端取 http 容易失败，统一升级 https；
+    // v=2 用于打破旧版 1x1 透明兜底图在浏览器里的 max-age=3600 缓存。
+    const safe = /^http:\/\//i.test(u) ? 'https://' + u.slice(7) : u;
+    return '/api/thumb?url=' + encodeURIComponent(safe) + '&v=2';
   }
 
   function fmtNum(n) {
@@ -73,10 +88,20 @@
     return String(n);
   }
 
-  /* ---------------- Cookie（本地保存，请求时带上） ---------------- */
+  /* ---------------- Cookie（本地保存，请求时带上） ----------------
+     header-ui.js 提供 window.__vgStore：内嵌预览窗口禁用 localStorage 时降级到内存，
+     否则裸 getItem 会抛 SecurityError，解析 / AI 总结会直接中断。 */
   const CK = 'vg_cookie';
-  const getCookie = () => localStorage.getItem(CK) || '';
-  const setCookieVal = (v) => (v ? localStorage.setItem(CK, v) : localStorage.removeItem(CK));
+  const readStore = (k) => {
+    if (window.__vgStore) return window.__vgStore.get(k);
+    try { return localStorage.getItem(k) || ''; } catch (e) { return ''; }
+  };
+  const writeStore = (k, v) => {
+    if (window.__vgStore) return v ? window.__vgStore.set(k, v) : window.__vgStore.remove(k);
+    try { if (v) localStorage.setItem(k, v); else localStorage.removeItem(k); } catch (e) { /* ignore */ }
+  };
+  const getCookie = () => readStore(CK);
+  const setCookieVal = (v) => writeStore(CK, v);
 
   // 「导入 Cookie」弹窗统一由 header-ui.js 提供（含获取指引 + 验证 + 状态显示），
   // 这里只保留读写 localStorage 的小工具，避免两套实现互相覆盖。
@@ -84,22 +109,25 @@
   window.__vgLastUrl = () => (els.input ? els.input.value.trim() : '');
   window.__vgAfterCookieSaved = (status) => {
     if (window.__vgSyncCookieState) window.__vgSyncCookieState();
-    const s = status || { count: 0, hasLogin: false };
+    const s = status || { count: 0, hasLogin: false, persisted: true };
     // 保存后会自动重解析一次；若失败，15 秒内不要再自动弹出 Cookie 弹窗，
     // 避免「保存 → 重解析失败 → 又弹窗」的连环弹窗
     suppressCookieModalUntil = Date.now() + 15000;
-    if (!s.count) {
+    if (s.persisted === false) {
+      toast('Cookie 已在当前页面生效；当前窗口禁用了本机存储，刷新后需重新导入（建议用外部浏览器打开）', 'error');
+    } else if (!s.count) {
       toast('已保存到本机，但格式没识别出来，这份内容不会生效；点右上角「导入 Cookie」对照示例修改', 'error');
       return; // 格式都不对，重解析没有意义
+    } else {
+      toast(
+        s.hasLogin
+          ? 'Cookie 已保存到本机（' + s.count + ' 项），页眉按钮已变为「Cookie 已导入」'
+          : '已保存到本机（' + s.count + ' 项），页眉按钮已变化；但缺登录态字段，可能仍解析失败',
+        s.hasLogin ? 'ok' : 'error'
+      );
     }
-    toast(
-      s.hasLogin
-        ? 'Cookie 已保存到本机（' + s.count + ' 项），页眉按钮已变为「Cookie 已导入」'
-        : '已保存到本机（' + s.count + ' 项），页眉按钮已变化；但缺登录态字段，可能仍解析失败',
-      s.hasLogin ? 'ok' : 'error'
-    );
     const u = els.input ? els.input.value.trim() : '';
-    if (u) setTimeout(function () { doParse(u, { quiet: true }); }, 120);
+    if (u && s.count) setTimeout(function () { doParse(u, { quiet: true }); }, 120);
   };
 
   function openCookieModal() {
@@ -133,6 +161,8 @@
       // 会漏到合集批量下载里，被服务端当成 B 站的档位 id 用
       selectedFormat = null;
       if (currentInfo.kind === 'playlist') {
+        els.root.classList.remove('is-workspace');
+        unmountAi();
         renderPlaylist(currentInfo);
       } else {
         selectedFormat =
@@ -141,6 +171,8 @@
       }
       els.root.scrollIntoView({ behavior: 'smooth', block: 'center' });
     } catch (e) {
+      els.root.classList.remove('is-workspace');
+      unmountAi();
       if (quiet) {
         // 保存 Cookie 后的自动重解析：保存提示已经发过一条 toast，
         // 这里只在结果区放一条静态说明，不再叠加第二条 toast、也不再弹窗
@@ -164,18 +196,32 @@
 
   function renderSkeleton() {
     els.root.hidden = false;
+    els.root.classList.add('is-workspace');
+    unmountAi();
+    // 骨架屏也用双栏，解析完成时不会从「单栏」跳成「双栏」
     els.root.innerHTML = `
-      <div class="card result-card">
-        <div class="media">
-          <div class="skeleton sk-figure" style="width:260px;border-radius:12px"></div>
-          <div class="media-body">
-            <div class="skeleton sk-line" style="width:80%;height:16px"></div>
-            <div class="skeleton sk-line" style="width:50%"></div>
-            <div class="skeleton sk-line" style="width:65%"></div>
+      <div class="workspace">
+        <div class="ws-left">
+          <div class="card result-card">
+            <div class="skeleton sk-figure" style="border-radius:12px"></div>
+            <div class="media-body" style="margin-top:14px">
+              <div class="skeleton sk-line" style="width:80%;height:16px"></div>
+              <div class="skeleton sk-line" style="width:50%"></div>
+              <div class="skeleton sk-line" style="width:65%"></div>
+            </div>
+            <div class="format-grid" style="margin-top:18px">
+              ${'<div class="skeleton" style="height:52px"></div>'.repeat(4)}
+            </div>
           </div>
         </div>
-        <div class="format-grid" style="margin-top:18px">
-          ${'<div class="skeleton" style="height:52px"></div>'.repeat(4)}
+        <div class="ws-right" id="aiHost">
+          <div class="ai-panel">
+            <div class="ai-head"><div><h3>AI 视频总结</h3><p>正在解析视频…</p></div></div>
+            <div class="ai-body"><div class="skeleton sk-line" style="width:70%;height:16px"></div>
+              <div class="skeleton sk-line" style="width:92%"></div>
+              <div class="skeleton sk-line" style="width:84%"></div>
+              <div class="skeleton sk-line" style="width:60%"></div></div>
+          </div>
         </div>
       </div>`;
   }
@@ -214,12 +260,16 @@
 
   function renderResult(d) {
     els.root.hidden = false;
+    els.root.classList.add('is-workspace');
+    unmountAi();
     const formats = d.formats || [];
     els.root.innerHTML = `
+      <div class="workspace">
+      <div class="ws-left">
       <div class="card result-card">
         <div class="media">
           <figure class="media-figure" id="previewBtn" title="预览">
-            ${d.thumbnail ? `<img src="${thumbUrl(d.thumbnail)}" alt="${esc(d.title)}" loading="lazy" />` : '<div style="width:100%;height:100%"></div>'}
+            ${d.thumbnail ? `<img src="${thumbUrl(d.thumbnail)}" alt="${esc(d.title)}" loading="lazy" />` : '<div class="thumb-empty">封面暂不可用</div>'}
             <span class="media-duration">${esc(d.duration_text || '')}</span>
             <span class="media-play"><span>
               <svg width="18" height="18" viewBox="0 0 24 24" fill="#1777ff"><path d="M8 5v14l11-7z"/></svg>
@@ -238,7 +288,6 @@
             ${d.description ? `<p class="media-desc">${esc(d.description)}</p>` : ''}
             <div class="media-actions">
               <button class="btn btn-sm" id="copyTitleBtn">复制标题</button>
-              <button class="btn btn-sm" id="aiNoteBtn" data-url="${esc(d.url)}">AI 总结</button>
               <a class="btn btn-sm" href="${esc(d.url)}" target="_blank" rel="noopener">原页面</a>
             </div>
           </div>
@@ -275,9 +324,13 @@
         </div>
 
         <div id="taskRoot"></div>
+      </div>
+      </div>
+      <div class="ws-right" id="aiHost"></div>
       </div>`;
 
     renderCodecHint(formats, selectedFormat);
+    mountAi(d);
 
     $('#formatGrid').addEventListener('click', (e) => {
       const btn = e.target.closest('.format-item');
@@ -318,6 +371,9 @@
 
   function renderPlaylist(d) {
     els.root.hidden = false;
+    // 合集 / 多 P 没有可总结的单条视频，保持原来的单栏全宽，不渲染 AI 右栏
+    els.root.classList.remove('is-workspace');
+    unmountAi();
     const picked = new Set(d.items.map((it) => it.index)); // 默认全选
     els.root.innerHTML = `
       <div class="card result-card">
@@ -677,6 +733,8 @@
     syncInputState();
     els.input.focus();
     els.root.hidden = true;
+    els.root.classList.remove('is-workspace');
+    unmountAi();
   };
   els.pasteBtn.onclick = async () => {
     try {
